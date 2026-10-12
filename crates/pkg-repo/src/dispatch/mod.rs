@@ -157,8 +157,10 @@
 //! file stays 0600 and the sidecars keep every capability dropped, so they
 //! read it as its owner — or, where no container user may be that owner (a
 //! remapped daemon, whose task containers and sidecars stay remapped, design
-//! v2 §19.1), `OMARCHY_AGENT_HELD=<code>` ([`AgentHeld`]): no probe and no
-//! model task runs, and the claim's `agent` says why. A changed
+//! v2 §19.1) or where there is no keys file (`no-keys`, #419: no mount then
+//! names a path podman's docker API would make a directory of),
+//! `OMARCHY_AGENT_HELD=<code>` ([`AgentHeld`]): no probe and no model task
+//! runs, and the claim's `agent` says why. A changed
 //! file recreates the dispatcher, which re-adopts its tasks. The dispatcher
 //! keeps the registration's id it learned in `state/host`.
 
@@ -348,8 +350,8 @@ pub struct Net {
     /// shows it (`OMARCHY_AGENT_USER`, which the agent writes); `None` from an agent before it,
     /// the image's own user.
     pub agent_user: Option<spec::AgentUser>,
-    /// The agent holds this host's model kinds though it has keys (#399, `OMARCHY_AGENT_HELD`):
-    /// no probe and no agent sidecar runs.
+    /// The agent holds this host's model kinds (#399, `OMARCHY_AGENT_HELD`): no container user
+    /// reads its keys, or it has no keys file (#419); no probe and no agent sidecar runs.
     pub agent_held: Option<AgentHeld>,
     pub caps: budget::Caps,
     /// How the engine keeps a task network's gateway off the host: asked of the engine at start.
@@ -402,11 +404,13 @@ impl Net {
     }
 }
 
-/// Why a host's agent holds its model kinds though it has keys (#399): `OMARCHY_AGENT_HELD`, a
-/// short code the agent writes into `etc/dispatcher.env` where no container user may read the
-/// owner-only keys file — a remapped daemon (`userns-remap`), whose agent sidecars stay remapped
-/// as every task container does (design v2 §19.1), and whose remapped uids are none of the
-/// owner's. The claim's `agent` says it in the probe's place, so the pool hands the host no
+/// Why a host's agent holds its model kinds (#399): `OMARCHY_AGENT_HELD`, a short code the agent
+/// writes into `etc/dispatcher.env` where no container user may read the owner-only keys file —
+/// a remapped daemon (`userns-remap`), whose agent sidecars stay remapped as every task container
+/// does (design v2 §19.1), and whose remapped uids are none of the owner's — or where there is
+/// no keys file at all (`no-keys`, #419): a mount of `OMARCHY_SECRETS_DIR/agent.env` that is not
+/// there fails the sidecar on docker, but podman's docker API makes an empty directory of it
+/// (studio-vm4k's rootless podman did), which then refused the keys given later. The claim's `agent` says it in the probe's place, so the pool hands the host no
 /// model work and its page says why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentHeld(String);
@@ -436,6 +440,7 @@ impl AgentHeld {
     pub fn reason(&self) -> String {
         match self.0.as_str() {
             "userns-remap" => "model kinds held: this daemon remaps users (userns-remap), so no container user is agent.env's owner, and the agent sidecars stay remapped (design v2 §19.1); how they read the keys here is a maintainer's decision (#399)".into(),
+            "no-keys" => "no agent keys: builds only. No agent keys file at OMARCHY_SECRETS_DIR/agent.env (none, or not a regular file), so no probe and no agent sidecar runs; its owner gives keys with Set agent keys on the host's page, or install --agent-env-from (#419)".into(),
             code => format!("model kinds held by this host's agent (OMARCHY_AGENT_HELD={code}, #399)"),
         }
     }

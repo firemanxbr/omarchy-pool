@@ -1081,8 +1081,8 @@ fn the_agent_sidecars_run_as_the_keys_owner_as_each_engine_shows_it() {
     assert!(not_secret(AGENT_USER) && not_secret(AGENT_HELD));
 }
 
-/// #399: what the owner is taken from — agent.toml's engine and remapping, and the keys file
-/// (or its directory before there is one) on this machine.
+/// #399: what the owner is taken from — agent.toml's engine and remapping, and the keys file on
+/// this machine; with no keys file, the hold (#419).
 #[test]
 fn the_keys_owner_is_read_from_agent_toml_and_the_file_on_this_machine() {
     use std::os::unix::fs::MetadataExt as _;
@@ -1119,15 +1119,52 @@ fn the_keys_owner_is_read_from_agent_toml_and_the_file_on_this_machine() {
         "{e}"
     );
 
-    // On this machine: the owner of the keys file, or of its directory before there is one.
+    // On this machine: the owner of the keys file; with no keys file held, so that no mount
+    // names one the engine would make (#419) — for no keys on every engine that does not remap,
+    // and for its remapping on one that does, which keys given later would not lift.
     let secrets = tempdir();
-    let dir = fs::metadata(&secrets).unwrap();
     let at = |e: Envelope| Rendered::now(&fixture("vps"), &tempdir(), Some(e)).keys_user;
     let here = Envelope {
         secrets_dir: secrets.clone(),
         ..envelope("/srv/s", Budget::default())
     };
-    assert_eq!(at(here.clone()), user(&dir));
+    let no_keys = Some(KeysUser::Held(HELD_NO_KEYS));
+    let remap = Some(KeysUser::Held(HELD_REMAP));
+    let every_engine = |e: &Envelope| {
+        [
+            (e.clone(), no_keys),
+            (
+                Envelope {
+                    engine: Engine::Rootless,
+                    ..e.clone()
+                },
+                no_keys,
+            ),
+            (
+                Envelope {
+                    userns_remap: true,
+                    ..e.clone()
+                },
+                remap,
+            ),
+        ]
+    };
+    for (e, held) in every_engine(&here) {
+        assert_eq!(at(e), held);
+    }
+    // What podman's docker API made of the sidecars' mount on studio-vm4k (#419): an empty
+    // directory is no keys file; nor is a link to one, which the agent never follows.
+    fs::create_dir(secrets.join("agent.env")).unwrap();
+    for (e, held) in every_engine(&here) {
+        assert_eq!(at(e), held);
+    }
+    fs::remove_dir(secrets.join("agent.env")).unwrap();
+    let elsewhere = tempdir().join("agent.env");
+    fs::write(&elsewhere, "GEMINI_API_KEY=x\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, secrets.join("agent.env")).unwrap();
+    assert_eq!(at(here.clone()), no_keys);
+    fs::remove_file(secrets.join("agent.env")).unwrap();
+    // The keys arrive: the hold ends, the sidecars run as the file's owner.
     fs::write(secrets.join("agent.env"), "GEMINI_API_KEY=x\n").unwrap();
     fs::set_permissions(secrets.join("agent.env"), fs::Permissions::from_mode(0o600)).unwrap();
     let file = fs::metadata(secrets.join("agent.env")).unwrap();
@@ -1144,10 +1181,76 @@ fn the_keys_owner_is_read_from_agent_toml_and_the_file_on_this_machine() {
         ..here.clone()
     };
     assert_eq!(at(remapped), Some(KeysUser::Held(HELD_REMAP)));
-    // No such directory (an agent.toml naming one install has not made): none.
+    // No such directory (an agent.toml naming one install has not made): no keys file either.
     let gone = Envelope {
         secrets_dir: secrets.join("absent"),
         ..here
     };
-    assert_eq!(at(gone), None);
+    assert_eq!(at(gone.clone()), no_keys);
+    // A remapped daemon with no keys file says its remapping, not the keys it may never use.
+    assert_eq!(
+        at(Envelope {
+            userns_remap: true,
+            ..gone
+        }),
+        remap
+    );
+}
+
+/// #419: with no keys file the agent renders `OMARCHY_AGENT_HELD=no-keys` — on studio-vm4k's
+/// rootless podman as anywhere — so the dispatcher starts no probe and no agent sidecar, and
+/// nothing names the missing file in a mount (podman's docker API makes an empty directory of
+/// it); the first render after the keys arrive
+/// takes the hold out for who the sidecars run as. Written by `refresh` as the run loop writes
+/// it every minute, the owner's lines kept, and only when it changes.
+#[test]
+fn a_host_with_no_keys_file_holds_its_model_kinds_until_the_keys_arrive() {
+    let (set, data, secrets) = (tempdir(), tempdir(), tempdir());
+    let env = path_in(&set);
+    fs::create_dir_all(env.parent().unwrap()).unwrap();
+    fs::write(&env, "# worker: m1-rack-0a9z\nTZ=UTC\n").unwrap();
+    fs::set_permissions(&env, fs::Permissions::from_mode(0o600)).unwrap();
+    let e = Envelope {
+        engine: Engine::Rootless,
+        secrets_dir: secrets.clone(),
+        ..envelope("/srv/s", Budget::default())
+    };
+    let now = || Rendered::now(&fixture("vps"), &data, Some(e.clone()));
+    let r = now();
+    assert_eq!(r.keys_user, Some(KeysUser::Held(HELD_NO_KEYS)));
+    assert_eq!(
+        r.lines().unwrap(),
+        [
+            "OMARCHY_HOST_ADDRESSES=203.0.113.10,2001:db8:abcd::/64,fe80::/64".to_owned(),
+            format!("OMARCHY_SECRETS_DIR={}", secrets.display()),
+            "OMARCHY_AGENT_HELD=no-keys".into(),
+        ]
+    );
+    assert_eq!(refresh(&env, &r), Ok(Refresh::Written));
+    let held = fs::read_to_string(&env).unwrap();
+    assert!(
+        held.ends_with("\nOMARCHY_AGENT_HELD=no-keys\nTZ=UTC\n")
+            && !held.contains("OMARCHY_AGENT_USER"),
+        "{held}"
+    );
+    assert_eq!(refresh(&env, &now()), Ok(Refresh::Unchanged));
+    // What the engine made of a mount of it before the hold: an empty directory is no keys
+    // file.
+    fs::create_dir(secrets.join("agent.env")).unwrap();
+    assert_eq!(refresh(&env, &now()), Ok(Refresh::Unchanged));
+    fs::remove_dir(secrets.join("agent.env")).unwrap();
+    // The keys arrive (install --agent-env-from, Set agent keys): the hold ends at the next
+    // render, which names the sidecars' user instead — and recreates the dispatcher with it.
+    fs::write(secrets.join("agent.env"), "GEMINI_API_KEY=g\n").unwrap();
+    fs::set_permissions(secrets.join("agent.env"), fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(refresh(&env, &now()), Ok(Refresh::Written));
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
+        held.replace("OMARCHY_AGENT_HELD=no-keys", "OMARCHY_AGENT_USER=0:0")
+    );
+    // Taken away again: held again.
+    fs::remove_file(secrets.join("agent.env")).unwrap();
+    assert_eq!(refresh(&env, &now()), Ok(Refresh::Written));
+    assert_eq!(fs::read_to_string(&env).unwrap(), held);
+    assert!(not_secret(AGENT_HELD));
 }
