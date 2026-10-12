@@ -124,6 +124,23 @@ export type Arch = (typeof ARCHES)[number];
 export const ISOLATIONS = ["root", "user", "subuid", "vm", "vm-shared"] as const;
 export type Isolation = (typeof ISOLATIONS)[number];
 
+/**
+ * A host's isolation level and whether the machine is the pool's alone, as its report says them (#407): its `runtime`'s word when
+ * it has one, else its `capacity`'s — run/capacity.json, the file its enrollment took both from, which install and every
+ * detection write and which agents up to 0.5.2 report them in only. Each is undefined when the report does not say it, or says a
+ * level outside ISOLATIONS or a `dedicated` that is not a boolean: the host's row then keeps its own, so neither an older report
+ * nor a word the pool does not know changes it.
+ */
+export function reportedIsolation(runtime: unknown, capacity: unknown): { isolation?: Isolation; dedicated?: boolean } {
+  const field = (o: unknown, k: string): unknown => (o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>)[k] : undefined);
+  const level = (v: unknown) => (ISOLATIONS.includes(v as Isolation) ? (v as Isolation) : undefined);
+  const flag = (v: unknown) => (typeof v === "boolean" ? v : undefined);
+  return {
+    isolation: level(field(runtime, "isolation")) ?? level(field(capacity, "isolation")),
+    dedicated: flag(field(runtime, "dedicated")) ?? flag(field(capacity, "dedicated")),
+  };
+}
+
 export interface Lane { arch: Arch; mode: "native" | "emulated"; via?: string; page16k?: boolean }
 /** A foreign architecture the host does not run, and why (#338, design v2 §7.5): binfmt missing ("needs a person: …"), the envelope, a smoke run that failed. */
 export interface HeldLane { arch: Arch; reason: string }

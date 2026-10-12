@@ -69,7 +69,7 @@ describe("GET /api/v1/pacman.conf", () => {
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
   it("names the flat directory second while objects are still moving out of it", async () => {
-    await env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+    await env.DB.prepare(`INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
       VALUES ('9999999999999999999999999999999999999999999999999999999999999999', 'old', '1-1', 'x86_64', 'old-1-1-x86_64.pkg.tar.zst', 1, 1, 0, '{}', 'core', 'x86_64/old-1-1-x86_64.pkg.tar.zst', 'x86_64')`).run();
     // (A distinct query each time: the include is served through the edge cache.)
     const x = await get("/api/v1/pacman.conf?ring=stable&arch=x86_64&with=moving");

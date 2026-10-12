@@ -99,34 +99,41 @@ async function batched(env: Env, stmts: D1PreparedStatement[]): Promise<number> 
   return written;
 }
 
+/** Every row of these sha256s: one per architecture the index holds the bytes for (0055), through idx_packages_sha256_repo_arch. */
+export const ROWS_OF_SHAS_SQL = "SELECT id, sha256 FROM packages WHERE sha256 IN (SELECT value FROM json_each(?))";
+
 export async function handlePutMatches(request: Request, env: Env): Promise<Response> {
   const body = await readJson<{ matches?: MatchIn[]; updated_at?: string }>(request);
   if (body instanceof Response) return body;
   const now = body.updated_at ?? new Date().toISOString();
   const matches = body.matches ?? [];
   const shas = [...new Set(matches.map((m) => m.sha256))];
-  const ids = new Map<string, number>();
+  // A match is about bytes: every row of them — one per architecture the
+  // index holds them for (migration 0055) — carries it.
+  const ids = new Map<string, number[]>();
   for (let i = 0; i < shas.length; i += 200) {
-    const rows = await env.DB.prepare("SELECT id, sha256 FROM packages WHERE sha256 IN (SELECT value FROM json_each(?))")
+    const rows = await env.DB.prepare(ROWS_OF_SHAS_SQL)
       .bind(JSON.stringify(shas.slice(i, i + 200)))
       .all<{ id: number; sha256: string }>();
-    for (const r of rows.results) ids.set(r.sha256, r.id);
+    for (const r of rows.results) ids.set(r.sha256, [...(ids.get(r.sha256) ?? []), r.id]);
   }
   const stmts = [];
   let unknown = 0;
   for (const m of matches) {
-    const id = ids.get(m.sha256);
-    if (!id) {
+    const rows = ids.get(m.sha256);
+    if (!rows) {
       unknown++;
       continue;
     }
-    stmts.push(
-      env.DB.prepare(
-        `INSERT INTO package_advisories (package_id, advisory_id, match, status, updated_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (package_id, advisory_id) DO UPDATE SET match = excluded.match, status = excluded.status, updated_at = excluded.updated_at
-         WHERE (match, status) IS NOT (excluded.match, excluded.status)`,
-      ).bind(id, m.advisory, m.match, m.status, now),
-    );
+    for (const id of rows) {
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO package_advisories (package_id, advisory_id, match, status, updated_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (package_id, advisory_id) DO UPDATE SET match = excluded.match, status = excluded.status, updated_at = excluded.updated_at
+           WHERE (match, status) IS NOT (excluded.match, excluded.status)`,
+        ).bind(id, m.advisory, m.match, m.status, now),
+      );
+    }
   }
   const written = await batched(env, stmts);
   return json({ matches: stmts.length, unknown_sha256: unknown, updated_at: now, rows_written: written });
@@ -195,7 +202,8 @@ export async function handleComponents(env: Env): Promise<Response> {
   for (const r of rows.results) {
     const k = `${r.ecosystem}\0${r.name}\0${r.version}`;
     const e = out.get(k) ?? { ecosystem: r.ecosystem, name: r.name, version: r.version, sha256s: [] };
-    e.sha256s.push(r.sha256);
+    // The same bytes served in both architectures (0055) are one object here.
+    if (!e.sha256s.includes(r.sha256)) e.sha256s.push(r.sha256);
     out.set(k, e);
   }
   return json({ components: [...out.values()] }, 200, { "cache-control": "public, max-age=300" });

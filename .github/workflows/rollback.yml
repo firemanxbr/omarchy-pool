@@ -10,19 +10,23 @@ name: Rollback
 # factory/bin/release-rollback does the work (tests/rollback-workflow.sh
 # holds it). Before anything moves: that release's multi-arch `:vX.Y.Z`
 # exists (a release writes it only once both architectures started every
-# role, so one whose smoke start failed is refused), and its Worker installs
-# and builds. Then `:x86_64` and `:aarch64` re-pointed at that release's
-# `:<arch>-vX.Y.Z` images, and `:latest` at its `:vX.Y.Z`, each signed; the
-# Worker deployed from the tag with POOL_VERSION set to it (no migration:
-# they are forward-only) — a deploy that fails puts the tags back where they
-# were; a `deploy` event; the running version checked. Then every updater
-# sees the pool's release change within two minutes and follows it down, as
-# it follows a release up. The same permissions and environment as
-# release.yml's image and deploy jobs, and its concurrency group: a rollback
-# and a release never run at once. Its one job both signs and deploys, so it
-# runs in the pool environment, which admits main only and waits for a
-# maintainer's approval like release (#308): a holder of `actions: write`
-# cannot send every host back alone. Its signing identity is
+# role, so one whose smoke start failed is refused), it is not below the
+# schema floor (a migration that marks itself `-- rollback-floor`, one no
+# earlier Worker can run on — 0055 the first, #421 — refuses every release
+# without it once the newest release carries it: only a roll forward helps
+# then), and its Worker installs and builds. Then `:x86_64` and `:aarch64`
+# re-pointed at that release's `:<arch>-vX.Y.Z` images, and `:latest` at its
+# `:vX.Y.Z`, each signed; the Worker deployed from the tag with POOL_VERSION
+# set to it (no migration: they are forward-only, most additive) — a deploy
+# that fails puts the tags back where they were; a `deploy` event; the
+# running version checked. Then every updater sees the pool's release change
+# within two minutes and follows it down, as it follows a release up. The
+# same permissions and environment as release.yml's image and deploy jobs,
+# and its concurrency group: a rollback and a release never run at once.
+# Its one job both signs and deploys, so it runs in the pool environment,
+# which admits main only and waits for a maintainer's approval like release
+# (#308): a holder of `actions: write` cannot send every host back alone.
+# Its signing identity is
 # https://github.com/firemanxbr/omarchy-pool/.github/workflows/rollback.yml@refs/heads/main.
 # Besides the images, it signs the rollback statement (#314) with that
 # identity, `cosign sign-blob --bundle` before anything moves, and stores it

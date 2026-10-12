@@ -381,19 +381,11 @@ impl Api {
         }
     }
 
-    /// Whether the index already knows this archive.
-    pub fn is_indexed(&self, sha256: &str) -> Result<bool, RepoError> {
-        self.retry("is_indexed", || {
-            let resp = self
-                .http
-                .get(self.url(&format!("/packages/{sha256}")))
-                .send()?;
-            match resp.status() {
-                StatusCode::OK => Ok(true),
-                StatusCode::NOT_FOUND => Ok(false),
-                _ => Self::check(resp).map(|_| false),
-            }
-        })
+    /// Whether the index already knows this archive for `arch`'s repository. The same
+    /// bytes can be indexed for both architectures (an `-any` archive Omarchy ships byte
+    /// for byte in both, #421), each row its own: known for one is not known for the other.
+    pub fn is_indexed(&self, sha256: &str, arch: &str) -> Result<bool, RepoError> {
+        Ok(!self.known(&[sha256.to_owned()], arch)?.is_empty())
     }
 
     /// Subset of `shas` the index already knows for `arch`.

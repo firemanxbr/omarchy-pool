@@ -283,9 +283,15 @@ impl Api {
 
     /// Light listing for status / list / search.
     /// The seal of an object: where it came from and the proof
-    /// (`GET /packages/:sha256/provenance`, routes/seal.ts).
-    pub fn provenance(&self, sha256: &str) -> Result<serde_json::Value> {
-        self.get(&format!("/packages/{sha256}/provenance"))
+    /// (`GET /packages/:sha256/provenance?arch=`, routes/seal.ts). The same
+    /// bytes can be indexed for both architectures (#421, migration 0055),
+    /// each with its own object and signature: `arch` asks for the one this
+    /// machine installs. A pool from before the parameter ignores it.
+    pub fn provenance(&self, sha256: &str, arch: &str) -> Result<serde_json::Value> {
+        self.get(&format!(
+            "/packages/{sha256}/provenance?arch={}",
+            urlencode(arch)
+        ))
     }
 
     pub fn release_summary(&self, ring: &str) -> Result<ReleaseSummaryView> {
@@ -436,5 +442,40 @@ mod tests {
         .map(|p| p.source)
         .collect();
         assert_eq!(picked, vec![Some("asahi-alarm".into())]);
+    }
+    /// The seal is asked for the machine's architecture: the same bytes can be
+    /// indexed for both (#421), each row naming its own object and signature.
+    #[test]
+    fn the_seal_is_asked_for_the_architecture_the_machine_installs() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            loop {
+                let mut h = String::new();
+                if reader.read_line(&mut h).unwrap() == 0 || h.trim().is_empty() {
+                    break;
+                }
+            }
+            let body = r#"{"repo_arch":"x86_64"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            line
+        });
+        let sha = "a".repeat(64);
+        let seal = Api::new(&base).unwrap().provenance(&sha, "x86_64").unwrap();
+        assert_eq!(seal["repo_arch"], "x86_64");
+        assert_eq!(
+            asked.join().unwrap().trim_end(),
+            format!("GET /api/v1/packages/{sha}/provenance?arch=x86_64 HTTP/1.1")
+        );
     }
 }

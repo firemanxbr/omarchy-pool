@@ -789,7 +789,9 @@ pub fn fast_track(api: &Api, opts: &FastTrackOptions<'_>) -> Result<FastTrackRep
                 .iter()
                 .find(|p| p.name == name && p.repo_arch == arch && p.version == clean)
             {
-                add.push(obj.sha256.clone());
+                // This architecture's row only: the same bytes can be indexed for both
+                // (#421), and the other architecture's entry is that loop's to decide.
+                add.push(format!("{}/{arch}", obj.sha256));
                 report
                     .fixes
                     .push((name, arch.to_owned(), vulnerable, clean));

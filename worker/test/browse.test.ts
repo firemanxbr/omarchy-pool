@@ -134,7 +134,7 @@ describe("GET /api/v1/packages over the fixture", () => {
   it("searches words of any length — D1 refuses a LIKE pattern over 50 bytes, and the search uses none — and never cuts a character in half", async () => {
     // A phrase longer than any pattern D1 takes, from a description, in capitals: found, not a 500.
     const long = "a description long enough that no LIKE pattern D1 takes could hold it";
-    const obj = (await env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-long', 'longword', '1-1', 'x86_64', 'longword-1-1-x86_64.pkg.tar.zst', 1, 1, 1, ?, 'extra', 'extra/x86_64/longword', 'x86_64') RETURNING id").bind(JSON.stringify({ description: long })).first<{ id: number }>())!.id;
+    const obj = (await env.DB.prepare("INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-long', 'longword', '1-1', 'x86_64', 'longword-1-1-x86_64.pkg.tar.zst', 1, 1, 1, ?, 'extra', 'extra/x86_64/longword', 'x86_64') RETURNING id").bind(JSON.stringify({ description: long })).first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?)").bind(obj).run();
     try {
       const d = await browse(env, browseQuery(new URLSearchParams({ q: long.toUpperCase() })).query);
@@ -165,7 +165,7 @@ describe("GET /api/v1/packages over the fixture", () => {
     // A name found nowhere, a filter, a search that is not a name, rows: nothing asked.
     for (const q of ["?q=zzfoo", `?q=${F.factoryPkg}&ring=stable`, `?q=${F.factoryPkg}&origin=factory`, "?q=two%20words", `?q=${F.pkg}`]) expect((await list(q)).d.held, q).toBeNull();
     // A build only in the lab: the lab's, on its architecture.
-    const obj = (await env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-lab', 'labonly', '1-1', 'aarch64', 'labonly-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{\"description\":\"in the lab\"}', 'alarm', 'alarm/aarch64/labonly', 'aarch64') RETURNING id").first<{ id: number }>())!.id;
+    const obj = (await env.DB.prepare("INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-lab', 'labonly', '1-1', 'aarch64', 'labonly-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{\"description\":\"in the lab\"}', 'alarm', 'alarm/aarch64/labonly', 'aarch64') RETURNING id").first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('lab', ?)").bind(obj).run();
     try {
       expect((await browse(env, browseQuery(new URLSearchParams("q=labonly")).query)).held).toEqual({ name: "labonly", where: "lab", arch: "aarch64" });
@@ -185,7 +185,7 @@ describe("GET /api/v1/packages over the fixture", () => {
     expect(await browseCounts(env, meter)).toEqual(was);
     expect(meter.rows).toBeLessThan(10);
     // A release moves edge's head: an object of a new name in the ring, counted at the next view.
-    const obj = (await env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-new', 'newcomer', '1-1', 'aarch64', 'newcomer-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{"description":"a newcomer"}', 'alarm', 'alarm/aarch64/newcomer', 'aarch64') RETURNING id`).first<{ id: number }>())!.id;
+    const obj = (await env.DB.prepare(`INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-new', 'newcomer', '1-1', 'aarch64', 'newcomer-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{"description":"a newcomer"}', 'alarm', 'alarm/aarch64/newcomer', 'aarch64') RETURNING id`).first<{ id: number }>())!.id;
     const rel = (await env.DB.prepare("INSERT INTO releases (ring, seq, parent_id) SELECT 'edge', MAX(seq) + 1, (SELECT release_id FROM ring_heads WHERE ring = 'edge') FROM releases WHERE ring = 'edge' RETURNING id").first<{ id: number }>())!.id;
     await env.DB.batch([env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?)").bind(obj), env.DB.prepare("UPDATE ring_heads SET release_id = ? WHERE ring = 'edge'").bind(rel)]);
     try {
@@ -370,7 +370,7 @@ describe("what a view reads", () => {
       }
     }
     const chunk = async (rows: string[], head: string) => { for (let i = 0; i < rows.length; i += 300) await env.DB.prepare(`${head} ${rows.slice(i, i + 300).join(",")}`).run(); };
-    await chunk(pk, "INSERT INTO packages (id, sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES");
+    await chunk(pk, "INSERT INTO packages (id, row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES");
     await chunk(rp, "INSERT INTO ring_packages (ring, package_id) VALUES");
     // New heads, so the counts are counted again over this pool.
     for (const ring of ["edge", "rc", "stable"]) {

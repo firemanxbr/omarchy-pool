@@ -378,7 +378,12 @@ hands a host work* has the rules.
 The host's page, `/hosts/<id>` (#324), shows you and the other maintainers
 everything its agent reports: the runtime and its versions (the agent's,
 the compose plugin and docker CLI the release pins), the isolation level
-and whether the machine is dedicated; CPUs, memory, the free disk on the
+and whether the machine is dedicated (as its last report's
+`run/capacity.json` says them, #407, a file the running agent does not
+count again: after a daemon moves to userns-remap, the install run again,
+or `omarchy-agent capacity --write`, rewrites it and the next report says
+`subuid`; the way back the same with `root`; the journal has a line for
+each change); CPUs, memory, the free disk on the
 work root and on the engine's data root, the units the pool counts — busy,
 free for a task, the one kept for pool jobs —, the agent slots, your caps
 (the envelope's) and the pool's cap, which you or any maintainer edit there

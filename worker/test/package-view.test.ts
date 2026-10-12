@@ -187,7 +187,7 @@ describe("the package page, drawn for every viewer", () => {
 
   it("opens an address that names no architecture on the one that serves the package, and says the rest where it does not", async () => {
     const id = (await env.DB.prepare(
-      `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+      `INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
        VALUES ('armonly-sha', 'armonly', '1.0-1', 'aarch64', 'armonly-1.0-1-aarch64.pkg.tar.zst', 40, 120, 1, '{"name":"armonly"}', 'core', 'core/aarch64/armonly-1.0-1-aarch64.pkg.tar.zst', 'aarch64') RETURNING id`,
     ).first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('stable', ?)").bind(id).run();
@@ -273,7 +273,7 @@ describe("the package page, drawn for every viewer", () => {
   it("draws a long file list's first 400 paths and the rest as one block on demand, never an element per file", async () => {
     const files = Array.from({ length: 450 }, (_, i) => `usr/share/big/file-${i}`);
     const id = (await env.DB.prepare(
-      `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+      `INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
        VALUES ('bigfiles-sha', 'bigfiles', '1-1', ?, 'bigfiles-1-1-x86_64.pkg.tar.zst', 40, 120, 1, ?, 'extra', 'extra/x86_64/bigfiles-1-1-x86_64.pkg.tar.zst', ?) RETURNING id`,
     ).bind(F.arch, JSON.stringify({ name: "bigfiles", files }), F.arch).first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('stable', ?)").bind(id).run();
@@ -332,7 +332,7 @@ describe("what the page reads", () => {
   it("says where each architecture of a package is served, and a name this architecture lacks says where the others are", async () => {
     // zlib on aarch64 too, in stable: an object of its own.
     const id = (await env.DB.prepare(
-      `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+      `INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
        VALUES ('arm-zlib-sha', 'zlib', '1:1.3.2-3', 'aarch64', 'zlib-1:1.3.2-3-aarch64.pkg.tar.zst', 40, 120, 1, '{"name":"zlib"}', 'core', 'core/aarch64/zlib-1:1.3.2-3-aarch64.pkg.tar.zst', 'aarch64') RETURNING id`,
     ).first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('stable', ?)").bind(id).run();
@@ -384,7 +384,7 @@ describe("what the page reads", () => {
       rc.push(`('rc', ${200000 + i})`);
     }
     for (let i = 0; i < pk.length; i += 400) {
-      await env.DB.prepare(`INSERT INTO packages (id, sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ${pk.slice(i, i + 400).join(",")}`).run();
+      await env.DB.prepare(`INSERT INTO packages (id, row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ${pk.slice(i, i + 400).join(",")}`).run();
       await env.DB.prepare(`INSERT INTO ring_packages (ring, package_id) VALUES ${rc.slice(i, i + 400).join(",")}`).run();
     }
     await env.DB.prepare("INSERT INTO ring_heads (ring, release_id) SELECT 'rc', id FROM releases ORDER BY id LIMIT 1 ON CONFLICT (ring) DO NOTHING").run();

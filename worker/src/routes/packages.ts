@@ -31,6 +31,12 @@ interface Manifest {
 }
 
 const OPS = [">=", "<=", "=", ">", "<"];
+const SHA256_RE = /^[0-9a-f]{64}$/;
+
+/** The row of these bytes for one repository architecture: one at most (idx_packages_sha256_repo_arch, migration 0055). */
+export const INDEXED_SQL = "SELECT id FROM packages WHERE sha256 = ? AND repo_arch = ?";
+/** Which of these sha256s are indexed for one architecture: the same index, a probe per sha256. */
+export const KNOWN_SQL = "SELECT sha256 FROM packages WHERE repo_arch = ? AND sha256 IN (SELECT value FROM json_each(?))";
 export const SOURCES = ["core", "extra", "multilib", "alarm", "packages", "chaotic", "asahi", "asahi-alarm", "aur", "factory"] as const;
 
 /** Parses the Arch dependency syntax the Rust side serializes rules as. */
@@ -64,30 +70,36 @@ export async function handlePostPackage(url: URL, request: Request, env: Env): P
   if (!m?.sha256 || !m.name || !m.version || !m.arch || !m.filename) {
     return json({ error: "manifest is missing required fields" }, 400);
   }
+  if (!SHA256_RE.test(m.sha256)) return json({ error: "sha256 must be 64 lower-case hex digits" }, 400);
   const key = packageKey(source, repoArch, m.filename);
   const blob = await env.PACKAGES.head(key);
   if (!blob) return json({ error: "archive not in pool; upload it first" }, 409);
   if (blob.size !== m.size_download) {
     return json({ error: `pool object is ${blob.size} bytes, manifest says ${m.size_download}` }, 422);
   }
-  const existing = await env.DB.prepare("SELECT id, repo_arch FROM packages WHERE sha256 = ?").bind(m.sha256).first<{ id: number; repo_arch: string }>();
-  if (existing?.repo_arch === repoArch) return json({ id: existing.id, sha256: m.sha256, status: "already-indexed" });
-  // One row per sha256 (0001_init.sql): the same bytes stored under both
-  // architecture directories can be indexed for one of them only.
-  if (existing) {
-    return json({ error: `these bytes are indexed for ${existing.repo_arch}; the index holds one row per sha256`, id: existing.id, repo_arch: existing.repo_arch }, 409);
-  }
+  // One row per (sha256, repo_arch) (migration 0055): bytes Omarchy ships
+  // in both architectures' repositories — an `-any` archive, byte for byte
+  // — are indexed once for each, every row naming its own object.
+  const existing = await env.DB.prepare(INDEXED_SQL).bind(m.sha256, repoArch).first<{ id: number }>();
+  if (existing) return json({ id: existing.id, sha256: m.sha256, status: "already-indexed" });
 
   const hasSig = (await env.PACKAGES.head(signatureKey(source, repoArch, m.filename))) ? 1 : 0;
   const files = m.files ?? [];
   delete m.files;
+  // The row's key is `<sha256>/<repo_arch>`; sha256 is the part before the
+  // '/', generated (0055). A row the same bytes got for this architecture
+  // in between (two runs at once) is the answer, not an error.
   const inserted = await env.DB.prepare(
-    `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch, elf_class)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    `INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch, elf_class)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING id`,
   )
-    .bind(m.sha256, m.name, m.version, m.arch, m.filename, m.size_download, m.size_installed, hasSig, JSON.stringify(m), source, key, repoArch, elfClassOf(m))
+    .bind(`${m.sha256}/${repoArch}`, m.name, m.version, m.arch, m.filename, m.size_download, m.size_installed, hasSig, JSON.stringify(m), source, key, repoArch, elfClassOf(m))
     .first<{ id: number }>();
-  const id = inserted!.id;
+  if (!inserted) {
+    const raced = await env.DB.prepare(INDEXED_SQL).bind(m.sha256, repoArch).first<{ id: number }>();
+    return json({ id: raced?.id ?? null, sha256: m.sha256, status: "already-indexed" });
+  }
+  const id = inserted.id;
   const gz = await gzipJson(files);
   await env.DB.prepare("INSERT INTO package_file_lists (package_id, count, gz) VALUES (?, ?, ?)").bind(id, files.length, gz).run();
 
@@ -128,8 +140,11 @@ export async function handlePostPackage(url: URL, request: Request, env: Env): P
   return json({ id, sha256: m.sha256, status: "indexed", components: (m.components ?? []).length }, 201);
 }
 
+/** One object's manifest. The same bytes indexed for both architectures (0055) have the same manifest: the first row's in the index's order, one row read. */
+export const MANIFEST_SQL = "SELECT manifest_json FROM packages WHERE sha256 = ? ORDER BY repo_arch LIMIT 1";
+
 export async function handleGetPackage(sha256: string, env: Env): Promise<Response> {
-  const row = await env.DB.prepare("SELECT manifest_json FROM packages WHERE sha256 = ?").bind(sha256).first<{ manifest_json: string }>();
+  const row = await env.DB.prepare(MANIFEST_SQL).bind(sha256).first<{ manifest_json: string }>();
   if (!row) return json({ error: "no package with this sha256" }, 404);
   return new Response(row.manifest_json, { headers: { "content-type": "application/json" } });
 }
@@ -150,13 +165,11 @@ export async function handleKnownPackages(request: Request, env: Env): Promise<R
   if (!isRepoArch(repoArch)) return json({ error: "arch must be x86_64 or aarch64" }, 400);
   const source = body.source ?? "";
   if ((body.filenames ?? []).length && !(SOURCES as readonly string[]).includes(source)) return json({ error: `source must be one of ${SOURCES.join(", ")}` }, 400);
-  const list = (body.sha256 ?? []).filter((s) => /^[0-9a-f]{64}$/.test(s));
+  const list = (body.sha256 ?? []).filter((s) => SHA256_RE.test(s));
   const known: string[] = [];
   for (let i = 0; i < list.length; i += 500) {
     const chunk = list.slice(i, i + 500);
-    const rows = await env.DB.prepare(
-      "SELECT sha256 FROM packages WHERE repo_arch = ? AND sha256 IN (SELECT value FROM json_each(?))",
-    )
+    const rows = await env.DB.prepare(KNOWN_SQL)
       .bind(repoArch, JSON.stringify(chunk))
       .all<{ sha256: string }>();
     for (const r of rows.results) known.push(r.sha256);

@@ -54,7 +54,7 @@ async function seed() {
     if (i <= SERVED) for (const ring of RINGS) rp.push(`('${ring}', ${i})`);
   }
   const chunk = async (rows: string[], head: string) => { for (let i = 0; i < rows.length; i += 400) await env.DB.prepare(`${head} ${rows.slice(i, i + 400).join(",")}`).run(); };
-  await chunk(pk, "INSERT INTO packages (id, sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch, created_at) VALUES");
+  await chunk(pk, "INSERT INTO packages (id, row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch, created_at) VALUES");
   await chunk(rp, "INSERT INTO ring_packages (ring, package_id) VALUES");
   let r = 0;
   for (const ring of RINGS) {
@@ -160,7 +160,7 @@ describe("what is outside retention", () => {
     // retention has let go of. And a victim nobody shares an object with.
     const twin = N + 1, alone = SERVED + RINGS.length + 1;
     await env.DB.prepare(
-      `INSERT INTO packages (id, sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch, created_at)
+      `INSERT INTO packages (id, row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch, created_at)
        VALUES (?, 'rebuilt', 'pkg1', '1-1', 'x86_64', ?, 100, 100, 1, '{}', 'extra', ?, 'x86_64', ?)`,
     ).bind(twin, file(1), key(1), OLD).run();
     await env.PACKAGES.put(key(1), new TextEncoder().encode("the served bytes"));

@@ -33,7 +33,7 @@ async function flat(source: string, arch: string, name: string, bytes: Uint8Arra
   await env.PACKAGES.put(`${arch}/${filename}`, bytes, { sha256: await sha256(bytes) });
   if (withSig) await env.PACKAGES.put(`${arch}/${filename}.sig`, new TextEncoder().encode(`sig of ${filename}`));
   await env.DB.prepare(
-    `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+    `INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
      VALUES (?, ?, '1.0-1', ?, ?, ?, 1, ?, '{}', ?, ?, ?)`,
   ).bind(sha, name, arch, filename, bytes.length, withSig ? 1 : 0, source, `${arch}/${filename}`, arch).run();
   return filename;
@@ -59,7 +59,7 @@ describe("POST /pool/relayout", () => {
     const app = new TextEncoder().encode("app, the edge build");
     const appFile = await flat("packages", "x86_64", "app", app, await sha256(app));
     await env.DB.prepare(
-      `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+      `INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
        VALUES (?, 'app', '1.0-1', 'x86_64', ?, ?, 1, 1, '{}', 'packages', ?, 'x86_64')`,
     ).bind("b".repeat(64), appFile, app.length, `x86_64/${appFile}`).run();
     // A row from before the column existed.
