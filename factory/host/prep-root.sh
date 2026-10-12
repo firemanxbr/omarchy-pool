@@ -36,7 +36,13 @@
 #   5. rootful: userns-remap (daemon.json), on a new daemon only (no
 #      container and no image yet): turning it on later changes the data
 #      root and strands what is there (the Studio's recorded exception,
-#      design v2 §19.1); docker restarted only when no container runs
+#      design v2 §19.1); docker restarted only when no container runs.
+#      First the dockremap user, with a subordinate range of its own in
+#      /etc/subuid and /etc/subgid (#405): without one docker makes the user
+#      and takes 100000-165535, the default range of the host's first user,
+#      whose own may be added later. The agent reads this range for the one
+#      remapped uid its sidecars read the keys as (65533 in, which agent.env's
+#      ACL names)
 #   6. the work root: a btrfs subvolume when its parent is btrfs (outside the
 #      root's snapshots), a directory otherwise; owned by the user, 0750; a
 #      symlink is refused (root would hand its target to the user)
@@ -126,6 +132,41 @@ put() {
   chmod "$mode" "$path.prep-root.tmp"
   mv "$path.prep-root.tmp" "$path"
   echo "    wrote $1"
+}
+
+# dockremap: the user docker's "userns-remap": "default" remaps to, made here with a subordinate
+# range of its own (#405) before docker would make it with 100000-165535, the default range of the
+# host's first user. Its 65536 ids start past every range /etc/subuid and /etc/subgid list, and
+# never below 165536 (past that first user's default); the same in both files. The agent reads it
+# for the one remapped uid its sidecars read the keys as. One that has a range keeps it.
+dockremap() {
+  local start=165536 f s n add=()
+  if getent passwd dockremap >/dev/null; then
+    echo "    the dockremap user: there"
+  else
+    run useradd --system --user-group --no-create-home --shell /bin/false dockremap
+    changed "the dockremap user (docker's userns-remap: default)"
+  fi
+  for f in /etc/subuid /etc/subgid; do
+    [[ -r "$fs$f" ]] || continue
+    while IFS=: read -r _ s n; do
+      if [[ "$s" =~ ^[0-9]+$ && "$n" =~ ^[0-9]+$ ]] && ((s + n > start)); then start=$((s + n)); fi
+    done < "$fs$f"
+  done
+  grep -qs '^dockremap:' "$fs/etc/subuid" || add+=(--add-subuids "$start-$((start + 65535))")
+  grep -qs '^dockremap:' "$fs/etc/subgid" || add+=(--add-subgids "$start-$((start + 65535))")
+  if ((${#add[@]} == 0)); then
+    echo "    dockremap's subordinate ids: $(grep -h '^dockremap:' "$fs/etc/subuid" | head -n1 | cut -d: -f2-), its own"
+    return
+  fi
+  for f in /etc/subuid /etc/subgid; do
+    [[ -e "$fs$f" ]] || run install -m 0644 /dev/null "$fs$f"
+  done
+  if run usermod "${add[@]}" dockremap; then
+    changed "dockremap's subordinate ids: $start-$((start + 65535)), its own (the agent sidecars read the keys as one of them)"
+  else
+    attention+=("dockremap: its subordinate ids were not added (usermod ${add[*]}); docker takes a range of its own when it starts")
+  fi
 }
 
 distro=""
@@ -245,6 +286,7 @@ elif [[ "$runtime" == rootful ]]; then
   else
     counts="$(docker info --format '{{.Containers}} {{.Images}}' 2>/dev/null || echo unknown)"
     if [[ "$counts" == "0 0" ]]; then
+      dockremap
       want="$(jq -S '. + {"userns-remap": "default"}' <<<"$want")"
       changed "turned on: a container escape lands in an unprivileged subuid"
     elif ((dry)) && [[ "$counts" == unknown ]]; then

@@ -8,7 +8,8 @@
 //! renamed over it inside that same directory descriptor, so nothing is written through a
 //! link planted in the meantime either. The agent keys' writers alone first remove an empty
 //! directory where their file goes ([`remove_empty_dir`], #419), which an engine made of a
-//! mount of it.
+//! mount of it, and on a remapped daemon put the ACL for the agent sidecars' uid on the new
+//! file before its rename ([`write_keys`], #405).
 
 use std::fs::File;
 use std::io::Write as _;
@@ -94,6 +95,42 @@ fn plain_name(name: &str) -> Result<(), String> {
 
 /// Writes `bytes` to `dir/name` with `mode`, as described above.
 pub(crate) fn write(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(), String> {
+    write_with(dir, name, bytes, mode, |_| Ok(()))
+}
+
+/// The agent keys (#405): `bytes` to `dir/name`, 0600, as [`write`] writes, and with `reader`
+/// (the agent sidecars' remapped uid on a remapped daemon, [`crate::dispatcher_env::remap`])
+/// the ACL that lets that uid read it too ([`super::acl`]), put on the temporary file between
+/// its `fchmod` and its rename, so the file is never there without it; it shows 0640 then (the
+/// mask in the group bits). A filesystem that refuses the ACL leaves the file 0600, written
+/// all the same: `Ok(Some(why))`, and the host stays held until the keys are written again
+/// on one that keeps it (fail closed).
+pub(crate) fn write_keys(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    reader: Option<u32>,
+) -> Result<Option<String>, String> {
+    let mut refused = None;
+    write_with(dir, name, bytes, 0o600, |f| {
+        if let Some(uid) = reader {
+            use std::os::fd::AsFd as _;
+            refused = super::acl::set(f.as_fd(), uid).err();
+        }
+        Ok(())
+    })?;
+    Ok(refused)
+}
+
+/// [`write`], with `then` run on the new file after its `fchmod`, before its contents and its
+/// rename.
+fn write_with(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    mode: u32,
+    then: impl FnOnce(&File) -> std::io::Result<()>,
+) -> Result<(), String> {
     plain_name(name)?;
     let dfd = owned_dir(dir)?;
     let path = dir.join(name);
@@ -133,6 +170,7 @@ pub(crate) fn write(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> Result<(
     let written = (|| {
         let mut f = File::from(fd);
         f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        then(&f)?;
         f.write_all(bytes)?;
         f.sync_all()
     })();

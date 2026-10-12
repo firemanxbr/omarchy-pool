@@ -671,6 +671,7 @@ fn keys_set_on_a_host_without_them_replace_an_empty_directory_and_end_its_hold()
             proc_net: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/addresses/home"),
             ifconfig: None,
+            remap: crate::dispatcher_env::remap::Files::at(&w.dir),
         },
     ));
     let env = w.set_dir().join("etc/dispatcher.env");
@@ -757,4 +758,79 @@ fn keys_set_on_a_host_without_them_replace_an_empty_directory_and_end_its_hold()
     );
     settle(&mut w);
     assert_ne!(dispatcher_id(&w), held);
+}
+
+/// #405: on a rootful daemon with userns-remap, keys set from the browser are written with the
+/// ACL that lets the agent sidecars' one remapped uid read them (dockremap's range, 65533 in):
+/// 0640, its owner's and that uid's only, and the hold for no keys ends at once with the sidecars
+/// named as that uid in the daemon's user namespace. Where the ACL cannot be set (a Mac, a
+/// filesystem that keeps none) the keys are written owner-only, the answer says so, and the
+/// host is held (`keys-acl`).
+#[test]
+fn keys_set_on_a_remapped_daemon_carry_the_acl_its_sidecars_read_them_through() {
+    let c = cases();
+    let mut w = owned(2);
+    let toml = fs::read_to_string(w.agent.paths.agent_toml())
+        .unwrap()
+        .replace("[envelope]\n", "[envelope]\nuserns_remap = true\n");
+    fs::write(w.agent.paths.agent_toml(), &toml).unwrap();
+    w.agent.cfg = crate::run::config::Config::parse(&toml).unwrap();
+    fs::write(
+        w.dir.join("subuid"),
+        "omarchy:100000:65536\ndockremap:231072:65536\n",
+    )
+    .unwrap();
+    w.agent.host_env = Some(crate::run::agent::HostEnv::new(
+        crate::dispatcher_env::Sources {
+            proc_net: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/addresses/home"),
+            ifconfig: None,
+            remap: crate::dispatcher_env::remap::Files::at(&w.dir),
+        },
+    ));
+    let env = w.set_dir().join("etc/dispatcher.env");
+    let keys = w.dir.join("secrets/agent.env");
+    let env_text = || fs::read_to_string(&env).unwrap();
+    w.tick(61);
+    settle(&mut w);
+    assert!(
+        env_text().contains("\nOMARCHY_AGENT_HELD=no-keys\n"),
+        "{}",
+        env_text()
+    );
+    send(
+        &w,
+        &[("ho_r1", OrderKind::SetAgentKeys(Some(signed(&c["keys"]))))],
+    );
+    w.poll();
+    let (outcome, detail) = answer(&w, "ho_r1");
+    assert_eq!(outcome, "done", "{detail}");
+    w.tick(3);
+    let mode = fs::metadata(&keys).unwrap().permissions().mode() & 0o777;
+    // On Linux the ACL is required, unless this filesystem keeps none (said, then the else).
+    if crate::install::acl::kept_in(&w.dir.join("secrets"), 296_605) {
+        assert!(!detail.contains("OMARCHY_AGENT_HELD"), "{detail}");
+        assert_eq!(mode, 0o640, "{detail}");
+        assert_eq!(
+            crate::install::acl::show(&crate::install::acl::read(&keys).unwrap().unwrap()),
+            "user::rw-,user:296605:r--,group::---,mask::r--,other::---"
+        );
+        let text = env_text();
+        assert!(
+            text.contains("\nOMARCHY_AGENT_REMAPPED_USER=65533:65533\n")
+                && !text.contains("OMARCHY_AGENT_HELD"),
+            "{text}"
+        );
+    } else {
+        assert_eq!(mode, 0o600);
+        assert!(
+            detail.contains("; but the host stays held, OMARCHY_AGENT_HELD=keys-acl (#405): no ACL lets the agent sidecars' remapped uid 296605 read it"),
+            "{detail}"
+        );
+        assert!(
+            env_text().contains("\nOMARCHY_AGENT_HELD=keys-acl\n"),
+            "{}",
+            env_text()
+        );
+    }
 }

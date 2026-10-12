@@ -35,7 +35,7 @@ please do not file a public issue for it.
 
 | Credential | Held by | Can do | Cannot do | Status |
 |---|---|---|---|---|
-| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, revoke their workers and give them orders from the worker's page or the API (re-check the agent, restart, restart the agent service, drain and resume, stop the task in hand, update; #277) — registering one is a maintainer's (#331), and a community registration whose owner is no maintainer claims nothing (#343) —, read their own state | write to the pool, claim jobs, approve | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
+| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, revoke their workers and give them orders from the worker's page or the API (re-check the agent, restart, restart the agent service, drain and resume, stop the task in hand, update; #277) — drain and resume from the worker's row of their own page too (#412), through the same door and its verdicts — registering one is a maintainer's (#331), and a community registration whose owner is no maintainer claims nothing (#343) —, read their own state | write to the pool, claim jobs, approve | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
 | Worker token `omw_…` | one machine, registered by a maintainer (#331) | claim tasks its trust allows (community: contributors' builds, anyone's; project: pool jobs too; a host: every kind its phase enables); heartbeat | write to the pool or staging directly | live |
 | Job token `omj.…` | the worker running one task, for the lease | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder, and nothing into the journal (the health and abi rows the gate reads are the project's jobs' alone); a dry run (`publish` 0): its task and the journal, no pool and no ring (#284) | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) — a task stopped from its worker's page is not renewed, and goes back to the queue only once its worker has stopped or the lease has ended, so no second runner overlaps its token; an audit's or a trial's report beside a staged build is taken only while the job's own task is still leased to its worker and not stopped (#277) | live |
 | Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271; a package whole or one architecture alone with its reason, two acts with a passkey answer each, #416); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any worker orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
@@ -291,12 +291,28 @@ secret). Everything travels in the `Authorization` header over TLS only.
   from a sidecar lands no higher than one from its task, at the host's
   isolation level. On a daemon with userns-remap no remapped uid is the
   owner, and its sidecars stay remapped as its task containers do (design v2
-  §19.1), so no sidecar can read the file there: the agent holds the host's
-  model kinds instead (`OMARCHY_AGENT_HELD=userns-remap`), the dispatcher
-  starts no probe and no agent sidecar, and the host's page says why. How a
-  remapped host reads its keys is a maintainer's decision still open, and
-  keys do not lift that hold. Any other host with no keys file is held the
-  same way (`OMARCHY_AGENT_HELD=no-keys`, #419), so no mount ever names a file
+  §19.1), so there the sidecars and the probe run as one remapped uid of
+  their own (`65533:65533` inside, the remap user's range start plus 65533 on
+  the host, named in `OMARCHY_AGENT_REMAPPED_USER`, which a dispatcher from
+  before #405 ignores rather than read as the file's owner and give a task's
+  usage directory to host uid 65533) and the agent, the file's owner, gives
+  the file a POSIX ACL that lets that uid read it (#405, the maintainers'
+  decision of 2026-10-08): the file is its owner's and that one uid's, 0640
+  with no group and no other access, put on the new file before its rename
+  whenever the keys are written, with no root, no capability and no visit.
+  It fails closed: an ACL lost (a `chmod`, a copy), one naming another uid, a
+  filesystem that keeps none, or no range the agent can read holds the
+  host's model kinds (`OMARCHY_AGENT_HELD=keys-acl` or `userns-remap`), and
+  so does the dispatcher when the daemon's maps do not hold that uid or
+  `agent.toml`'s `userns_remap` is not the daemon's: it starts no probe and
+  no agent sidecar, and the host's page says why. That uid is in
+  the same remapped range as every task container's: a task root that escapes
+  holds its namespace's capabilities and can become it, and then reaches a
+  running agent sidecar's processes and their mounts as it reaches another
+  task's (above); what keeps the keys at rest from it is the secrets
+  directory, the agent user's and 0700, which no remapped uid may enter, and
+  that only the probe and agent sidecars mount the file. Any host with no
+  keys file is held (`OMARCHY_AGENT_HELD=no-keys`, #419), so no mount ever names a file
   that is not there, which podman's docker API makes a directory of (as it
   did on a rootless podman host). The dispatcher refuses to
   start with an agent key or a GitHub token in its own environment and keeps the

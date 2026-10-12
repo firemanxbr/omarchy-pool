@@ -622,8 +622,11 @@ network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a 
            resolved address) on the shared omarchy-egress bridge and on the task's network, the task's HTTP(S)_PROXY;
            a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,
            its usage in <task dir>/agent; run as agent.env's owner as the engine shows it, OMARCHY_AGENT_USER, never
-           out of the engine's user namespace: on a remapped daemon, or with no keys file (#419), OMARCHY_AGENT_HELD
-           instead, no agent sidecar and no probe, #399); all removed with the lease, orphans of this host swept
+           out of the engine's user namespace, #399: on a remapped daemon as 65533:65533, OMARCHY_AGENT_REMAPPED_USER,
+           the remapped uid agent.env's ACL lets read it, its usage directory given to that uid on the host, #405;
+           with no keys file (#419), or on a remapped daemon with no such uid or ACL, OMARCHY_AGENT_HELD instead,
+           no agent sidecar and no probe);
+           all removed with the lease, orphans of this host swept
            at start and before each /28 is chosen;
            factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress — on a
            host whose envelope grants it (OMARCHY_DIRECT_NETWORK, #373); elsewhere handed back lost (the attempt

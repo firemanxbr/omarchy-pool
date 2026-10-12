@@ -671,6 +671,7 @@ mod tests {
         Sources {
             proc_net: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/addresses/home"),
             ifconfig: None,
+            remap: crate::dispatcher_env::remap::Files::at(Path::new("/nonexistent")),
         }
     }
 
