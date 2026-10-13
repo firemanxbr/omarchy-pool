@@ -17,12 +17,23 @@
 
 /**
  * A bump (updates.ts): the pool's own build of a new upstream release — the approved recipe moved to the tag
- * (`bump:<task>@<tag>`), or drafted again for it when that architecture's last bump failed (#435), whose ref is a
- * draft's and whose reason is a bump's all the same.
+ * (`bump:<task>@<tag>`), or, after that architecture's last bump failed or left the approved recipe (#435), a draft
+ * for the tag or the source's own PKGBUILD at it. Told by what only the server writes: the `bump:` ref, or
+ * `params.bump` (the tag), which updates.ts sets on every bump it queues. Never by `reason`, which a Build once
+ * carried from the asker as it was: a build read as a bump is not judged by its request.
  */
-export function isBump(t: { pkgbuild_ref?: string | null; reason?: string | null }): boolean {
-  return !!t.pkgbuild_ref?.startsWith("bump:") || !!t.reason?.startsWith("bump to ");
+export function isBump(t: { pkgbuild_ref?: string | null; params?: string | Record<string, unknown> | null }): boolean {
+  if (t.pkgbuild_ref?.startsWith("bump:")) return true;
+  let p: unknown = t.params;
+  if (typeof p === "string") {
+    try { p = JSON.parse(p); } catch { return false; }
+  }
+  const tag = p && typeof p === "object" ? (p as { bump?: unknown }).bump : undefined;
+  return typeof tag === "string" && tag !== "";
 }
+
+/** isBump as a SQL condition on a build_tasks row (no alias): the same two marks only the server writes. */
+export const BUMP_SQL = "(pkgbuild_ref LIKE 'bump:%' OR json_extract(params, '$.bump') IS NOT NULL)";
 
 export interface ChainInput {
   /** The contributor's build: how many leases it took, how it ended. */

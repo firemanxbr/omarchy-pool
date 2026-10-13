@@ -1004,9 +1004,12 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
         // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the queue when nothing was named.
         // A build sent back for a native worker (needs_native) still waits for one there — or for a 4K-page lane, unless one refused it
         // too (refused_4k, #413); a worker named is the asker's own choice.
-        const marks = !pinned && dup.params ? (JSON.parse(dup.params) as { needs_native?: number; refused_4k?: number }) : {};
+        const was = dup.params ? (JSON.parse(dup.params) as { needs_native?: number; refused_4k?: number; bump?: unknown }) : {};
+        const marks = !pinned ? was : {};
         if (marks.needs_native === 1) params.needs_native = 1;
         if (marks.needs_native === 1 && marks.refused_4k === 1) params.refused_4k = 1;
+        // A bump the pool queued (updates.ts: a draft for the tag, #435) stays one, whoever asks again for it: the mark is the server's.
+        if (typeof was.bump === "string") params.bump = was.bump;
         await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, params = ? WHERE id = ? AND status = 'queued'")
           .bind(pinned, Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
         ids.push(dup.id);
@@ -1044,8 +1047,12 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
 
 /** POST /factory/packages/:name/build — the Build button: the same queue the request used, with the asker's choice of worker and hint. */
 export async function handleBuildPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { arches?: unknown; reason?: string; release?: string; worker?: unknown; hint?: unknown };
-  const out = await queueBuilds(env, c, name, { arches: Array.isArray(b.arches) ? (b.arches as string[]) : undefined, worker: typeof b.worker === "string" ? b.worker : null, hint: typeof b.hint === "string" ? b.hint : null, reason: b.reason, release: b.release });
+  const b = (await request.json().catch(() => ({}))) as { arches?: unknown; reason?: unknown; release?: string; worker?: unknown; hint?: unknown };
+  // The asker's reason is a word on the row, no more: "bump to <tag>" is the pool's own (updates.ts) — the daily check reads a
+  // queued one as that tag's bump already pending, and the 30-day rule as a bump nobody built — so no asker may write it (#435).
+  const reason = typeof b.reason === "string" && b.reason.trim() ? b.reason.trim().slice(0, 200) : undefined;
+  if (reason && /^bump to /i.test(reason)) return json({ error: "\"bump to …\" is the pool's own reason for a bump it queues; give your build another reason, or none" }, 400);
+  const out = await queueBuilds(env, c, name, { arches: Array.isArray(b.arches) ? (b.arches as string[]) : undefined, worker: typeof b.worker === "string" ? b.worker : null, hint: typeof b.hint === "string" ? b.hint : null, reason, release: b.release });
   if (out instanceof Response) return out;
   if (!out.tasks.length) return json({ ...out, note: `already building: ${out.building.map((x) => `#${x.task} (${x.arch}${x.on ? ` on ${x.on}` : ""})`).join(", ")} — ask again when it ends` }, 200);
   return json({ ...out, note: out.pinned_to ? `${out.pinned_to} builds these; nothing else claims them.` : "In the queue: the next host of the architecture with room takes it, contributors' builds in turn." }, 201);

@@ -637,6 +637,27 @@ describe("a package request", () => {
     // Review sees the same: the staged build — gate passed, audit ok — is not ready for the request alone, and says why in the score.
     const row = (await call("GET", "/factory/review?t=before")).json.staged.find((x: any) => x.name === "older");
     expect(row.score).toMatchObject({ ready: false, points: 47 }); // 50 for the half, less the 3 the request loses
+    // A reason is the asker's word, never the pool's (#435): "bump to …" is refused at the door — a bump is evidence for the
+    // maintainer, not the request's, and a queued one holds its tag's bump back — and an ordinary reason goes on the row as said.
+    const tasksBefore = (await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'older'").first<{ n: number }>())!.n;
+    const forged = await call("POST", "/factory/packages/older/build", { reason: "  Bump to v10" }, "omc_alice");
+    expect(forged.status).toBe(400);
+    expect(forged.json.error).toMatch(/the pool's own reason for a bump/);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'older'").first<{ n: number }>())!.n).toBe(tasksBefore);
+    const was = (await env.DB.prepare("SELECT status, detail, targets FROM factory_packages WHERE name = 'older'").first<{ status: string; detail: string | null; targets: string | null }>())!;
+    const said = await call("POST", "/factory/packages/older/build", { reason: "after the upstream fix" }, "omc_alice");
+    expect(said.status, JSON.stringify(said.json)).toBe(201);
+    expect(await env.DB.prepare("SELECT reason FROM build_tasks WHERE id = ?").bind(said.json.tasks[0]).first()).toEqual({ reason: "after the upstream fix" });
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM build_tasks WHERE id = ?").bind(said.json.tasks[0]),
+      env.DB.prepare("UPDATE factory_packages SET status = ?, detail = ?, targets = ? WHERE name = 'older'").bind(was.status, was.detail, was.targets),
+    ]);
+    // A row that carries it all the same — written before the door refused it — is still judged by its request: the score reads
+    // a bump by what only the server writes (score.ts isBump: the bump: ref, params.bump), so it stays not ready, 47.
+    await env.DB.prepare("UPDATE build_tasks SET reason = 'bump to v9' WHERE id = ?").bind(task).run();
+    expect((await call("GET", "/factory/review?t=forged")).json.staged.find((x: any) => x.name === "older").score).toMatchObject({ ready: false, points: 47 });
+    expect((await call("GET", "/factory/packages/older/story?t=forged")).json.chains[0].score).toMatchObject({ ready: false });
+    await env.DB.prepare("UPDATE build_tasks SET reason = 'contributor' WHERE id = ?").bind(task).run();
     // The owner renews it while it is staged (nothing is being built): a new request, complete, and the same package is ready again.
     const body = { name: "older", url: "https://older.example", source: "https://older.example/older-9.tar.gz", version: "9", description: "An older tool", license: "Apache-2.0", arches: ["aarch64"], checklist: { official: true, license: true, unshipped: true, evidence: true } };
     const renewed = await call("POST", "/factory/packages", body, "omc_alice");

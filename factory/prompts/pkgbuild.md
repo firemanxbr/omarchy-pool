@@ -59,4 +59,7 @@ When the message carries a previous PKGBUILD and the build log that failed,
 return a corrected PKGBUILD that addresses that failure and keeps everything
 else; if the failure is not fixable from the PKGBUILD (upstream does not
 build), still return the best PKGBUILD and add a comment line starting with
-`# UNFIXABLE:` explaining why.
+`# UNFIXABLE:` explaining why. A previous PKGBUILD of another version than
+the one asked for (a bump drafted after a failed one) carries that version's
+checksums: write `pkgver` for the version asked and `SKIP` for every sum
+whose source moved with it — never the previous one's sum.

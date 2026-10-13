@@ -163,14 +163,21 @@ verify and attest the package faster and approve it with more confidence.
    for each approved package's latest release and queues a community build
    from the contributor's staged PKGBUILD with `pkgver` moved to the tag
    (`bump:<task>@<tag>`) — into the queue at once, as a request's build
-   (#343) — and a maintainer reviews it like the first time. A bump has no
-   agent: it moves a recipe, it does not write one. So when an
-   architecture's last bump since the approval failed, its next one is a
-   draft for the new tag (`draft:<url>@<tag>`) with the failed build as its
-   lesson — the agent reads that recipe, its log and the skills — still
-   a bump (`reason` *bump to <tag>*), still evidence (#435: omarchy-cli's
+   (#343) — and a maintainer reviews it like the first time. Each
+   architecture moves its own approved recipe (the name's newest approval
+   where it has none of its own). A bump has no agent: it moves a recipe,
+   it does not write one. So when an architecture's last bump since the
+   approval failed — or had already left the approved recipe — its next
+   one leaves it too: a draft for the new tag (`draft:<url>@<tag>`) that
+   learns from that last bump (the agent reads its recipe, its log and
+   the skills), or, for a package whose source ships its own PKGBUILD,
+   that PKGBUILD at the tag (`<url>@<tag>:<path>`, as its request built
+   it — never an agent's recipe in its place). It goes back to the
+   approved recipe once a maintainer approves a newer build. Still a bump
+   (`params.bump`, the tag: the server's mark, never the asker's `reason`,
+   which may not start *bump to*), still evidence (#435: omarchy-cli's
    recipe built the whole workspace, and its bump to v1.1.4 failed on both
-   architectures).
+   architectures — the x86_64 one from the aarch64 recipe).
    30 days without a build and the package is *unmaintained* until someone
    takes it (docs/GOVERNANCE.md) — a maintainer, from Review's *No
    maintainer* tab or the package's page: *Adopt*, one door for both, makes

@@ -36,8 +36,6 @@ export interface TaskBrief {
   queue?: { position: number; total: number } | null;
   /** Where the recipe came from (draft:, <url>@<tag>:<path>, bump:<task>@<tag>, review:<task>). */
   pkgbuild_ref?: string | null;
-  /** Why it was queued: "bump to <tag>" for a bump, whichever recipe it starts from (isBump). */
-  reason?: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -79,7 +77,7 @@ export interface Chain {
   recipes: { contributor: string | null; project: string | null };
 }
 
-const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, reason, priority, created_at, started_at, finished_at, duration_ms, error, params, result, independent";
+const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, priority, created_at, started_at, finished_at, duration_ms, error, params, result, independent";
 
 function brief(r: Record<string, unknown>): TaskBrief {
   const parse = (s: unknown) => { try { return s ? (JSON.parse(s as string) as Record<string, unknown>) : null; } catch { return null; } };
