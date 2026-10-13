@@ -9,7 +9,7 @@
  */
 import { json, type Env } from "../index";
 import { RINGS, ringsSql } from "../meta";
-import { scoreChain, type Score } from "../score";
+import { isBump, scoreChain, type Score } from "../score";
 import { requestChecks, type RequestRow, type RequestChecks } from "../request";
 import { recordUrl } from "../record";
 import { queuePosition } from "../queue";
@@ -36,6 +36,8 @@ export interface TaskBrief {
   queue?: { position: number; total: number } | null;
   /** Where the recipe came from (draft:, <url>@<tag>:<path>, bump:<task>@<tag>, review:<task>). */
   pkgbuild_ref?: string | null;
+  /** Why it was queued: "bump to <tag>" for a bump, whichever recipe it starts from (isBump). */
+  reason?: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -77,7 +79,7 @@ export interface Chain {
   recipes: { contributor: string | null; project: string | null };
 }
 
-const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, priority, created_at, started_at, finished_at, duration_ms, error, params, result, independent";
+const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, reason, priority, created_at, started_at, finished_at, duration_ms, error, params, result, independent";
 
 function brief(r: Record<string, unknown>): TaskBrief {
   const parse = (s: unknown) => { try { return s ? (JSON.parse(s as string) as Record<string, unknown>) : null; } catch { return null; } };
@@ -144,7 +146,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
     const withdrawn = mine.find((a) => a.withdrawn_at) ?? null;
     const auditReport = audit?.result as { verdict?: string; findings?: { severity: string }[] } | null | undefined;
     const score = scoreChain({
-      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status, version: contributor.version, bump: !!contributor.pkgbuild_ref?.startsWith("bump:") } : null,
+      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status, version: contributor.version, bump: isBump(contributor) } : null,
       vet: vetOf(contributor),
       audit: audit ? { status: audit.status, verdict: auditReport?.verdict ?? null, high: (auditReport?.findings ?? []).filter((f) => f.severity === "high").length, findings: (auditReport?.findings ?? []).length } : null,
       request,

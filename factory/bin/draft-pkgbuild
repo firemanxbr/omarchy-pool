@@ -154,7 +154,9 @@ def template(a):
     if bs == "rust":
         deps = rust_depends(a)
         dep_line = ("depends=(" + " ".join(f"'{d}'" for d in deps) + ")\n") if deps else ""
-        return head + common + dep_line + "makedepends=('cargo')\n" + src + f'''
+        # options=('!lto'): makepkg's -flto=auto (on in Arch's x86_64 makepkg.conf) reaches a crate's C through
+        # the cc crate, and Arch's rust links with ld.lld, which cannot read GCC's LTO objects (skills: Rust).
+        return head + common + dep_line + "makedepends=('cargo')\noptions=('!lto')\n" + src + f'''
 prepare() {{
   cd {srcdir}
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"

@@ -496,6 +496,9 @@ jobs:
       - name: The worker's own package and its last words
         working-directory: .
         run: bash tests/worker-main-package.sh
+      - name: The gate warns on a recipe that runs cargo with makepkg's lto on, however its options say it
+        working-directory: .
+        run: bash tests/worker-gate-lto.sh
       - name: The gate's reading of namcap, and namcap's library map on aarch64
         working-directory: .
         run: bash tests/worker-gate-namcap.sh

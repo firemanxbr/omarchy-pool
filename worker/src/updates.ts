@@ -11,6 +11,16 @@
  * approval was taken back gets no bump and no bump starts from a
  * withdrawn recipe. Before 2026-09-18 this read `decision` alone.
  *
+ * A bump has no agent (design v2 §9.2: a recipe moved, not written), so a
+ * recipe that no longer builds the new release would fail the same way at
+ * every tag. When an architecture's last bump since the approval that
+ * stands failed, that architecture's next one is drafted instead
+ * (`draft:<url>@<tag>`, the failed build as its `lesson`): an agent writes
+ * the recipe for the tag from the failed recipe and its log, with the
+ * skills — omarchy-cli's recipe built the whole workspace, and its bump to
+ * v1.1.4 failed on both architectures (#435). It is evidence like any bump,
+ * `reason` "bump to <tag>" all the same, and a maintainer decides it.
+ *
  * The build goes to the queue at once, as a request's does: every
  * maintainer host builds every contributor's packages (#343, design v2
  * §8.2) — the fourteen days a bump once waited for its owner's own worker
@@ -49,6 +59,22 @@ async function latestTag(url: string, env: Env, fetcher: typeof fetch): Promise<
   if (!res.ok) throw new Error(`releases of ${m[1]}/${m[2]}: HTTP ${res.status}`);
   const r = (await res.json()) as { tag_name?: string; draft?: boolean; prerelease?: boolean };
   return r.tag_name && !r.draft && !r.prerelease ? r.tag_name : null;
+}
+
+/**
+ * The recipe of one architecture's bump to `tag`: the approved PKGBUILD with pkgver moved (`bump:<task>@<tag>`), unless that
+ * architecture's last bump since the approval failed — then a draft for the tag with the failed build as its lesson. Read by
+ * the name's index (name, arch, id), newest first and no further back than the approved build: a task made after the approval
+ * has a larger id than the build it approved.
+ */
+async function bumpRecipe(env: Env, p: Pkg, arch: string, tag: string, approved: { task_id: number; created_at: string }): Promise<{ ref: string; lesson: number | null }> {
+  const last = await env.DB.prepare(
+    `SELECT id, status FROM build_tasks WHERE name = ? AND arch = ? AND id > ? AND kind = 'build' AND trust = 'community' AND reason LIKE 'bump to %' AND created_at > ? ORDER BY id DESC LIMIT 1`,
+  )
+    .bind(p.name, arch, approved.task_id, approved.created_at)
+    .first<{ id: number; status: string }>();
+  if (last?.status === "failed") return { ref: `draft:${p.url}@${tag}`, lesson: last.id };
+  return { ref: `bump:${approved.task_id}@${tag}`, lesson: null };
 }
 
 export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof fetch = fetch): Promise<string> {
@@ -92,7 +118,7 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
     if (!tag) continue;
     const want = pkgverOf(tag);
     // What was approved last and still stands: its version and the task whose PKGBUILD to start from.
-    const approved = await env.DB.prepare(`SELECT task_id, version FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`).bind(p.name).first<{ task_id: number; version: string | null }>();
+    const approved = await env.DB.prepare(`SELECT task_id, version, created_at FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`).bind(p.name).first<{ task_id: number; version: string | null; created_at: string }>();
     if (!approved) continue;
     const have = (approved.version ?? "").replace(/^\d+:/, "").replace(/-\d+$/, "");
     if (have === want) continue;
@@ -100,13 +126,19 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
     const pending = await env.DB.prepare("SELECT id FROM build_tasks WHERE name = ? AND reason = ? AND (status IN ('queued', 'leased', 'staged') OR (status = 'cancelled' AND error LIKE 'taken out of the queue%'))").bind(p.name, `bump to ${tag}`).first();
     if (pending) continue;
     const arches = (JSON.parse(p.arches || "[]") as string[]).filter((a) => a === "x86_64" || a === "aarch64");
+    // Each architecture's recipe: the approved one moved to the tag, or a draft when that architecture's last bump since the approval failed (#435).
+    const recipes = await Promise.all(arches.map((arch) => bumpRecipe(env, p, arch, tag, approved)));
+    const drafted = arches.filter((_, i) => recipes[i].lesson !== null);
     await env.DB.batch([
-      ...arches.map((arch) =>
-        env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, 'build')`)
-          .bind(p.name, arch, `${want}-1`, `bump:${approved.task_id}@${tag}`, `bump to ${tag}`, p.owner),
+      ...arches.map((arch, i) =>
+        env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, 'build', ?)`)
+          .bind(p.name, arch, `${want}-1`, recipes[i].ref, `bump to ${tag}`, p.owner, recipes[i].lesson === null ? null : JSON.stringify({ lesson: recipes[i].lesson })),
       ),
       env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`${tag} released upstream; a build is queued for the pool's hosts`, p.name),
-      env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('bump', NULL, 'factory', 'ok', ?, ?)").bind(`${p.name}: upstream ${tag} (approved ${approved.version ?? "?"}); build queued on ${arches.join(", ")}`, JSON.stringify({ name: p.name, tag, approved: approved.version, arches, owner: p.owner })),
+      env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('bump', NULL, 'factory', 'ok', ?, ?)").bind(
+        `${p.name}: upstream ${tag} (approved ${approved.version ?? "?"}); build queued on ${arches.join(", ")}${drafted.length ? ` — drafted again on ${drafted.map((a) => `${a} (its last bump, build ${recipes[arches.indexOf(a)].lesson}, failed)`).join(", ")}` : ""}`,
+        JSON.stringify({ name: p.name, tag, approved: approved.version, arches, owner: p.owner, ...(drafted.length ? { drafted: Object.fromEntries(drafted.map((a) => [a, recipes[arches.indexOf(a)].lesson])) } : {}) }),
+      ),
     ]);
     await settleTargets(env, p.name);
     log.push(`${p.name}: ${tag} queued`);

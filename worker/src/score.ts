@@ -15,6 +15,15 @@
  * start. Nothing here decides anything: the number ranks, people approve.
  */
 
+/**
+ * A bump (updates.ts): the pool's own build of a new upstream release — the approved recipe moved to the tag
+ * (`bump:<task>@<tag>`), or drafted again for it when that architecture's last bump failed (#435), whose ref is a
+ * draft's and whose reason is a bump's all the same.
+ */
+export function isBump(t: { pkgbuild_ref?: string | null; reason?: string | null }): boolean {
+  return !!t.pkgbuild_ref?.startsWith("bump:") || !!t.reason?.startsWith("bump to ");
+}
+
 export interface ChainInput {
   /** The contributor's build: how many leases it took, how it ended. */
   contributor: { attempts: number; status: string; version?: string | null; bump?: boolean } | null;

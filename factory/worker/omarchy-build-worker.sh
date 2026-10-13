@@ -770,6 +770,11 @@ desktop_app_checks() { # /usr/bin/name real-executable entries
   echo "runs $exe, every library resolves$( [[ -n "$entries" ]] && echo ", $(wc -w <<<"$entries") desktop entry(ies) valid" || echo ", no desktop entry")"
   return 0
 }
+# A recipe that runs cargo and leaves makepkg's lto option on (Arch's makepkg.conf turns it on): no `!lto` in its options.
+cargo_lto_on() { # PKGBUILD → 0 when cargo runs with lto on
+  grep -qE '(^|[[:space:];&|(])cargo[[:space:]]' "$1" 2>/dev/null || return 1
+  ! grep -qE "(^|[[:space:](])[\"']?!lto([\"'[:space:])]|$)" "$1"
+}
 vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and tests.log
   local name="$1" pkgs=(/build/out/*.pkg.tar.zst) out fails
   echo '{"schema":"omarchy-pool/vet/1","verdict":"pending","checks":[]}' >"$VET_JSON"; : >"$VET_LOG"
@@ -815,6 +820,13 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
       vet_add "prebuilt-debug:$(basename "$p")" fail "a -debug split of a package that compiled nothing — set options=('!debug') in the PKGBUILD (a prebuilt binary carries no debug info of ours)"
     done
   fi
+  # 4c. a Rust recipe with makepkg's lto on: the cc crate compiles a crate's C (ring, aws-lc-sys) with -flto=auto,
+  # GCC writes bytecode-only objects, and Arch's rust links through ld.lld, which cannot read them. Arch's x86_64
+  # makepkg.conf turns lto on and Arch Linux ARM's off, so the x86_64 link fails on symbols the aarch64 one finds
+  # (omarchy-cli v1.1.4, #435). Built here, it may still fail on the other architecture: a warning, so the
+  # maintainer sees it before that build does (skills: Rust).
+  if cargo_lto_on /build/pkg/PKGBUILD; then vet_add lto warn "cargo builds with makepkg's lto on: set options=('!lto') — Arch's rust links with ld.lld, which cannot read the GCC LTO objects of a crate's C sources, and x86_64's makepkg.conf turns lto on"
+  elif grep -qE '(^|[[:space:];&|(])cargo[[:space:]]' /build/pkg/PKGBUILD; then vet_add lto pass "cargo builds with options=('!lto')"; fi
   # 5. the file list: standard paths only, no libtool archives, not empty.
   for p in "${pkgs[@]}"; do
     out="$(pacman -Qlp "$p" 2>/dev/null | awk '{print $2}')"

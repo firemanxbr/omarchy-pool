@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { checkUpdates, pkgverOf } from "../src/updates";
+import { isBump } from "../src/score";
 import { pkgbuildFields } from "../src/requests";
 import { parseProjectUrl, sha256Hex } from "../src/routes/contributors";
 
@@ -63,6 +64,74 @@ describe("bumps", () => {
     const events = (await env.DB.prepare("SELECT summary FROM events WHERE kind = 'bump' ORDER BY id").all<{ summary: string }>()).results.map((e) => e.summary);
     expect(events).toHaveLength(2);
     expect(events.join("\n")).not.toContain("taken");
+  });
+});
+
+// #435: a bump has no agent, so a recipe that no longer builds the new release failed again at every tag (omarchy-cli's
+// built the whole workspace; its bump to v1.1.4 failed on both architectures). An architecture whose last bump since the
+// approval failed gets its next one drafted, with the failed build as the lesson; the other keeps the approved recipe.
+describe("a bump after a failed one", () => {
+  it("is drafted for the new tag with the failed build as its lesson, on that architecture only", async () => {
+    await env.DB.prepare("INSERT INTO contributors (login, token_hash, role) VALUES ('fx', ?, 'maintainer'), ('m2', ?, 'maintainer')").bind(await sha256Hex("omc_fx"), await sha256Hex("omc_m2")).run();
+    const task = async (name: string, arch: string, version: string, ref: string, reason: string, status: string, at: string): Promise<number> =>
+      (await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, created_at) VALUES (?, ?, ?, ?, ?, 100, ?, 0, ?, 'fx', 'build', ?) RETURNING id")
+        .bind(name, arch, version, ref, reason, status, ref.startsWith("review:") ? "project" : "community", at).first<{ id: number }>())!.id;
+    const url = "https://github.com/firemanxbr/omarchy-pool";
+    for (const name of ["omarchy-cli", "steady"]) {
+      await env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status) VALUES (?, 'fx', ?, '["x86_64","aarch64"]', 'approved')`).bind(name, name === "steady" ? "https://github.com/fx/steady" : url).run();
+    }
+    // omarchy-cli: the project's build approved at 0.0.168 (task 1410's part), then the bump to v1.1.4 — failed on x86_64 (the link), cancelled on aarch64.
+    const approvedTask = await task("omarchy-cli", "aarch64", "0.0.168", "review:506", "project build asked by fx", "done", "2026-10-08T17:31:40.295Z");
+    await env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, created_at) VALUES (?, 'omarchy-cli', 'aarch64', '0.0.168', 'approved', 'm2', '2026-10-12T19:45:23.098Z')").bind(approvedTask).run();
+    const failedX86 = await task("omarchy-cli", "x86_64", "1.1.4-1", `bump:${approvedTask}@v1.1.4`, "bump to v1.1.4", "failed", "2026-10-13T05:50:46.098Z");
+    await task("omarchy-cli", "aarch64", "1.1.4-1", `bump:${approvedTask}@v1.1.4`, "bump to v1.1.4", "cancelled", "2026-10-13T05:50:46.098Z");
+    // steady: a bump that failed before the approval that stands — what was approved since is the recipe, not that failure.
+    const steadyOld = await task("steady", "x86_64", "0.9-1", "bump:1@v0.9", "bump to v0.9", "failed", "2026-10-01T05:50:00.000Z");
+    const steadyApproved = await task("steady", "x86_64", "1.0-1", "draft:https://github.com/fx/steady@v1.0", "contributor", "staged", "2026-10-02T05:50:00.000Z");
+    await env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, created_at) VALUES (?, 'steady', 'x86_64', '1.0-1', 'approved', 'm2', '2026-10-03T00:00:00.000Z')").bind(steadyApproved).run();
+    expect(steadyOld).toBeLessThan(steadyApproved);
+
+    const github = (tag: string): typeof fetch => async () => new Response(JSON.stringify({ tag_name: tag }), { status: 200, headers: { "content-type": "application/json" } });
+    expect(await checkUpdates(env, new Date("2026-10-14T05:45:00Z"), github("v1.1.5"))).toContain("omarchy-cli: v1.1.5 queued");
+    type Row = { name: string; arch: string; id: number; version: string; pkgbuild_ref: string; reason: string; params: string | null; trust: string; status: string };
+    const queued = async (reason: string) => (await env.DB.prepare("SELECT name, arch, id, version, pkgbuild_ref, reason, params, trust, status FROM build_tasks WHERE reason = ? AND name IN ('omarchy-cli', 'steady') ORDER BY name, arch").bind(reason).all<Row>()).results;
+    const v115 = await queued("bump to v1.1.5");
+    expect(v115.map((t) => [t.name, t.arch, t.pkgbuild_ref, t.params])).toEqual([
+      ["omarchy-cli", "aarch64", `bump:${approvedTask}@v1.1.5`, null],
+      ["omarchy-cli", "x86_64", `draft:${url}@v1.1.5`, JSON.stringify({ lesson: failedX86 })],
+      ["steady", "aarch64", `bump:${steadyApproved}@v1.1.5`, null],
+      ["steady", "x86_64", `bump:${steadyApproved}@v1.1.5`, null],
+    ]);
+    for (const t of v115) expect(t).toMatchObject({ version: "1.1.5-1", trust: "community", status: "queued" });
+    // Both are bumps, whichever recipe they start from: the score reads them as evidence for the maintainer, not the request's.
+    for (const t of v115) expect(isBump(t)).toBe(true);
+    expect(isBump({ pkgbuild_ref: `draft:${url}@v0.0.168`, reason: "contributor" })).toBe(false);
+    // The journal says which architecture was drafted again, and from which build.
+    const line = await env.DB.prepare("SELECT summary, payload FROM events WHERE kind = 'bump' AND summary LIKE 'omarchy-cli:%' ORDER BY id DESC LIMIT 1").first<{ summary: string; payload: string }>();
+    expect(line?.summary).toBe(`omarchy-cli: upstream v1.1.5 (approved 0.0.168); build queued on x86_64, aarch64 — drafted again on x86_64 (its last bump, build ${failedX86}, failed)`);
+    expect(JSON.parse(line!.payload)).toMatchObject({ tag: "v1.1.5", drafted: { x86_64: failedX86 } });
+    expect(JSON.parse((await env.DB.prepare("SELECT payload FROM events WHERE kind = 'bump' AND summary LIKE 'steady:%'").first<{ payload: string }>())!.payload)).not.toHaveProperty("drafted");
+
+    // The draft failed too, and so did aarch64's bump: the next tag is drafted on both, each from its own last failure.
+    const draftX86 = v115.find((t) => t.name === "omarchy-cli" && t.arch === "x86_64")!.id;
+    const bumpArm = v115.find((t) => t.name === "omarchy-cli" && t.arch === "aarch64")!.id;
+    await env.DB.prepare("UPDATE build_tasks SET status = 'failed' WHERE id IN (?, ?)").bind(draftX86, bumpArm).run();
+    await checkUpdates(env, new Date("2026-10-15T05:45:00Z"), github("v1.1.6"));
+    const v116 = (await queued("bump to v1.1.6")).filter((t) => t.name === "omarchy-cli");
+    expect(v116.map((t) => [t.arch, t.pkgbuild_ref, t.params])).toEqual([
+      ["aarch64", `draft:${url}@v1.1.6`, JSON.stringify({ lesson: bumpArm })],
+      ["x86_64", `draft:${url}@v1.1.6`, JSON.stringify({ lesson: draftX86 })],
+    ]);
+
+    // Staged, then approved at 1.1.6: the next bump starts from the approved recipe again, on both.
+    for (const t of v116) await env.DB.prepare("UPDATE build_tasks SET status = 'staged' WHERE id = ?").bind(t.id).run();
+    const review = await task("omarchy-cli", "x86_64", "1.1.6-1", `review:${v116[1].id}`, "project build asked by fx", "done", "2026-10-15T09:00:00.000Z");
+    await env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, created_at) VALUES (?, 'omarchy-cli', 'x86_64', '1.1.6-1', 'approved', 'm2', '2026-10-15T10:00:00.000Z')").bind(review).run();
+    await checkUpdates(env, new Date("2026-10-16T05:45:00Z"), github("v1.1.7"));
+    expect((await queued("bump to v1.1.7")).filter((t) => t.name === "omarchy-cli").map((t) => [t.arch, t.pkgbuild_ref, t.params])).toEqual([
+      ["aarch64", `bump:${review}@v1.1.7`, null],
+      ["x86_64", `bump:${review}@v1.1.7`, null],
+    ]);
   });
 });
 

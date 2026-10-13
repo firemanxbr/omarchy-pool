@@ -45,7 +45,7 @@ export async function recordOf(env: Env, login: string): Promise<TrackRecord> {
   const [built, reviewed, donated, decided] = await Promise.all([
     env.DB.prepare(
       `SELECT SUM(CASE WHEN staged_prefix IS NOT NULL THEN 1 ELSE 0 END) AS staged,
-              SUM(CASE WHEN staged_prefix IS NOT NULL AND pkgbuild_ref LIKE 'bump:%' THEN 1 ELSE 0 END) AS bumps
+              SUM(CASE WHEN staged_prefix IS NOT NULL AND (pkgbuild_ref LIKE 'bump:%' OR reason LIKE 'bump to %') THEN 1 ELSE 0 END) AS bumps
          FROM build_tasks WHERE owner = ? AND kind = 'build' AND trust = 'community'`,
     ).bind(login).first<{ staged: number | null; bumps: number | null }>(),
     env.DB.prepare(

@@ -160,7 +160,14 @@ verify and attest the package faster and approve it with more confidence.
    for each approved package's latest release and queues a community build
    from the contributor's staged PKGBUILD with `pkgver` moved to the tag
    (`bump:<task>@<tag>`) — into the queue at once, as a request's build
-   (#343) — and a maintainer reviews it like the first time.
+   (#343) — and a maintainer reviews it like the first time. A bump has no
+   agent: it moves a recipe, it does not write one. So when an
+   architecture's last bump since the approval failed, its next one is a
+   draft for the new tag (`draft:<url>@<tag>`) with the failed build as its
+   lesson — the agent reads that recipe, its log and the skills — still
+   a bump (`reason` *bump to <tag>*), still evidence (#435: omarchy-cli's
+   recipe built the whole workspace, and its bump to v1.1.4 failed on both
+   architectures).
    30 days without a build and the package is *unmaintained* until someone
    takes it (docs/GOVERNANCE.md) — a maintainer, from Review's *No
    maintainer* tab or the package's page: *Adopt*, one door for both, makes

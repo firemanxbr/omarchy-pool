@@ -1,6 +1,6 @@
 import { json, type Env } from "../index";
 import { REPO_ARCHES, RINGS, ringsSql, sortRings, WORKER_ALIVE_MINUTES } from "../meta";
-import { scoreChain } from "../score";
+import { isBump, scoreChain } from "../score";
 import { requestChecks } from "../request";
 import { contributorOf, drainedRefusal, isMaintainer, MAINTAINER_DECIDES, sha256Hex, SIGN_IN, viaOf, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
@@ -118,7 +118,7 @@ interface Staged {
 export async function handleReviewList(env: Env, request: Request): Promise<Response> {
   const [c, solo] = await Promise.all([contributorOf(request, env), soloOf(env)]);
   const staged = await env.DB.prepare(
-    `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.created_at, t.finished_at, t.pkgbuild_ref, t.result, t.attempts,
+    `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.created_at, t.finished_at, t.pkgbuild_ref, t.reason, t.result, t.attempts,
             t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by, w.agent AS worker_agent,
             p.owner AS package_owner, p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source, p.project AS request_project, p.description AS request_description, p.targets, p.arches AS request_arches,
             q.id AS request_id, q.version AS request_version, q.checklist AS request_checklist, q.migrated AS request_migrated, q.record AS request_record, q.sha256 AS request_sha256, q.created_at AS request_created_at,
@@ -178,14 +178,14 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
   });
   // The contributor's build behind each of the project's rows in the list (its gate, its audit, its attempts): the score needs both halves.
   const fromIds = staged.results.map((r) => (r.trust === "project" && r.params ? (JSON.parse(r.params as string) as { review?: number }).review : null)).filter((x): x is number => typeof x === "number");
-  const fromRows = new Map<number, { id: number; owner: string | null; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
+  const fromRows = new Map<number, { id: number; owner: string | null; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; reason: string | null; audit_status: string | null; audit_result: string | null }>();
   if (fromIds.length) {
     const rows = await env.DB.prepare(
-      `SELECT t.id, t.owner, t.attempts, t.status, t.result, t.version, t.pkgbuild_ref,
+      `SELECT t.id, t.owner, t.attempts, t.status, t.result, t.version, t.pkgbuild_ref, t.reason,
               (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
               (SELECT u.result FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_result
          FROM build_tasks t WHERE t.id IN (${fromIds.map(() => "?").join(", ")})`,
-    ).bind(...fromIds).all<{ id: number; owner: string | null; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
+    ).bind(...fromIds).all<{ id: number; owner: string | null; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; reason: string | null; audit_status: string | null; audit_result: string | null }>();
     for (const r of rows.results) fromRows.set(r.id, r);
   }
   // The chain's score (score.ts) from what the row and its other half carry; `ready` = the contributor's half is complete, a maintainer's time is well spent.
@@ -201,10 +201,10 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     if (r.trust === "project") {
       const from = r.params ? (JSON.parse(r.params as string) as { review?: number }).review : undefined;
       const c = from ? fromRows.get(from) : undefined;
-      return scoreChain({ contributor: c ? { attempts: c.attempts, status: c.status, version: c.version, bump: !!c.pkgbuild_ref?.startsWith("bump:") } : null, vet: c ? vetOf(c.result) : null, audit: c ? audit(c.audit_status, c.audit_result) : null, request, project: { status: r.status as string, attempts: r.attempts as number }, projectVet: vetOf(r.result as string | null), trial: trial(r.trial_status as string | null, r.trial_result as string | null), approval: null, category: (r.category as string | null) ?? null });
+      return scoreChain({ contributor: c ? { attempts: c.attempts, status: c.status, version: c.version, bump: isBump(c) } : null, vet: c ? vetOf(c.result) : null, audit: c ? audit(c.audit_status, c.audit_result) : null, request, project: { status: r.status as string, attempts: r.attempts as number }, projectVet: vetOf(r.result as string | null), trial: trial(r.trial_status as string | null, r.trial_result as string | null), approval: null, category: (r.category as string | null) ?? null });
     }
     const pb = projectOf.get(r.id as number);
-    return scoreChain({ contributor: { attempts: r.attempts as number, status: r.status as string, version: (r.version as string | null) ?? null, bump: String(r.pkgbuild_ref ?? "").startsWith("bump:") }, vet: vetOf(r.result as string | null), audit: audit(r.audit_status as string | null, r.audit_result as string | null), request, project: pb ? { status: pb.status, attempts: pb.attempts } : null, projectVet: pb ? vetOf(pb.result) : null, trial: pb ? trial(pb.trial_status, pb.trial_result) : null, approval: null, category: (r.category as string | null) ?? null });
+    return scoreChain({ contributor: { attempts: r.attempts as number, status: r.status as string, version: (r.version as string | null) ?? null, bump: isBump({ pkgbuild_ref: (r.pkgbuild_ref as string | null) ?? null, reason: (r.reason as string | null) ?? null }) }, vet: vetOf(r.result as string | null), audit: audit(r.audit_status as string | null, r.audit_result as string | null), request, project: pb ? { status: pb.status, attempts: pb.attempts } : null, projectVet: pb ? vetOf(pb.result) : null, trial: pb ? trial(pb.trial_status, pb.trial_result) : null, approval: null, category: (r.category as string | null) ?? null });
   };
   // A build of a version a maintainer already approved — the same name,
   // version and architecture, an earlier task — is nothing to decide: the

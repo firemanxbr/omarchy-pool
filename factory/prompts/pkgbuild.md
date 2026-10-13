@@ -29,6 +29,8 @@ Rules, all of them:
 - Rust: `cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"`
   in prepare(), `cargo build --frozen --release` in build(), install the binary
   from `target/release/`. `export CARGO_TARGET_DIR=target` before building.
+  In a workspace, build and test the package's own crate alone (`-p <crate>`),
+  never `--workspace`; always `options=('!lto')` (the Rust skill says why).
 - Go: `go build` with `-trimpath -buildmode=pie -mod=readonly -modcacherw`,
   `-ldflags "-linkmode external -extldflags \"$LDFLAGS\""`, `export CGO_CPPFLAGS="$CPPFLAGS" CGO_CFLAGS="$CFLAGS" CGO_CXXFLAGS="$CXXFLAGS" CGO_LDFLAGS="$LDFLAGS" GOFLAGS=…`.
 - CMake: `cmake -B build -S "$pkgname-$pkgver" -DCMAKE_BUILD_TYPE=None -DCMAKE_INSTALL_PREFIX=/usr` then `cmake --build build`, `DESTDIR="$pkgdir" cmake --install build`.
