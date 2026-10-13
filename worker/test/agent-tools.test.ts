@@ -15,9 +15,10 @@
  * for reject and block, the predicate run again, expired after thirty
  * minutes. Revocation: logout, the person's page and a contributor's block.
  * The limits: the bursts (the rate limiting bindings, real in workerd), the
- * day's counts by login, the cost guard. Text evidence is edge-cached and
- * read by its tail; a package in staging never is. Every new query is asked
- * for its plan.
+ * day's counts by login — five requests, fifty for a maintainer's agent, the
+ * 429's limit the cap that applied — the cost guard. Text evidence is
+ * edge-cached and read by its tail; a package in staging never is. Every new
+ * query is asked for its plan.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -29,7 +30,7 @@ import {
 } from "../src/routes/agents";
 import { BLOCK_GRANTS_SQL } from "../src/routes/blocks";
 import { PENDING_CODES_SQL } from "../src/routes/gc";
-import { agentName, daySql, DRAFT_MINUTES, GRANT_SQL, s256 } from "../src/agents";
+import { agentName, DAY_CAPS, dayCap, daySql, DRAFT_MINUTES, GRANT_SQL, s256 } from "../src/agents";
 import { forgetGuardWord } from "../src/cost";
 import { assert as answer, b64url, concat, createAuthenticator, register, unb64url, EDDSA, RS256, UP, UV } from "./soft-authenticator.mjs";
 
@@ -1141,7 +1142,8 @@ describe("the limits", () => {
     const a = await login("frank", "Day one");
     for (let i = 0; i < 5; i++) expect((await call("POST", "/factory/packages", { url: "" }, a.token)).status).toBe(400);
     const over = await call("POST", "/factory/packages", { url: "" }, a.token);
-    expect([over.status, over.json.code]).toEqual([429, "day_limit"]);
+    expect([over.status, over.json.code, over.json.limit]).toEqual([429, "day_limit", 5]);
+    expect(over.json.error).toMatch(/^frank made 5 requests through agents today \(UTC\)/);
     expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(0);
     const b = await login("frank", "Day two");
     expect((await request("frankly", b.token)).status).toBe(429);
@@ -1155,6 +1157,36 @@ describe("the limits", () => {
     const r = await call("POST", "/factory/tasks/999999/release", { reason: "abcd" }, m3.token);
     expect(r.status).toBe(404);
     expect((await call("POST", "/factory/tasks/999999/build", {}, m3.token)).json.code).toBe("day_limit");
+  });
+
+  it("fifty requests a day for a maintainer's agent (the role read with the grant), five for everyone else's; claims and drafts the same for both", () => {
+    const as = (role: string) => ({ login: "x", name: null, avatar_url: null, role, blocked: null });
+    expect(DAY_CAPS).toEqual({ requests: 5, claims: 10, drafts: 30, maintainer_requests: 50 });
+    expect((["requests", "claims", "drafts"] as const).map((k) => [dayCap(k, as("maintainer")), dayCap(k, as("contributor"))])).toEqual([[50, 5], [10, 10], [30, 30]]);
+  });
+
+  it("a maintainer's agent takes fifty requests and the fifty-first is answered 429 with limit 50; its claims stop at ten and its drafts at thirty", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await env.DB.prepare("UPDATE contributors SET agent_day = NULL, agent_requests = 0, agent_claims = 0, agent_drafts = 0 WHERE login = 'm2'").run();
+    const m2 = await login("m2", "Day fifty", "contribute,review");
+    for (let i = 0; i < 50; i++) expect((await call("POST", "/factory/packages", { url: "" }, m2.token)).status, `request ${i + 1}`).toBe(400);
+    const over = await call("POST", "/factory/packages", { url: "" }, m2.token);
+    expect([over.status, over.json.code, over.json.limit]).toEqual([429, "day_limit", 50]);
+    expect(over.json.error).toMatch(/^m2 made 50 requests through agents today \(UTC\)/);
+    expect(await env.DB.prepare("SELECT agent_day, agent_requests FROM contributors WHERE login = 'm2'").first()).toEqual({ agent_day: today, agent_requests: 50 });
+    // The maintainer's own request on the web is not an agent's: not counted, not refused.
+    expect((await call("POST", "/factory/packages", { url: "" }, "omc_m2")).status).toBe(400);
+    // Claims: ten, a release counting as one, as everyone's.
+    await env.DB.prepare("UPDATE contributors SET agent_claims = 9 WHERE login = 'm2'").run();
+    expect((await call("POST", "/factory/tasks/999999/release", { reason: "abcd" }, m2.token)).status).toBe(404);
+    const claims = await call("POST", "/factory/tasks/999999/build", {}, m2.token);
+    expect([claims.status, claims.json.code, claims.json.limit]).toEqual([429, "day_limit", 10]);
+    // Drafts: thirty; a draft the handler then refuses has still counted.
+    await env.DB.prepare("UPDATE contributors SET agent_drafts = 29 WHERE login = 'm2'").run();
+    const draft = { name: "nothing-here", verdict: "approve", note: "reads well", task: 999999 };
+    expect((await call("POST", "/factory/drafts", draft, m2.token)).status).not.toBe(429);
+    const drafts = await call("POST", "/factory/drafts", draft, m2.token);
+    expect([drafts.status, drafts.json.code, drafts.json.limit]).toEqual([429, "day_limit", 30]);
   });
 
   it("with the cost guard up, an agent's write is answered 503 and a person's write on the web is not", async () => {

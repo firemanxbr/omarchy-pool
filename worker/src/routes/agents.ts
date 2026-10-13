@@ -332,7 +332,7 @@ export async function handleDraft(a: AgentCaller, request: Request, env: Env, or
   // A verdict is on a build: without one the arguments are wrong, and are refused before the day counts.
   const id = typeof b.task === "number" && Number.isInteger(b.task) ? b.task : NaN;
   if (verdict !== "block" && !Number.isInteger(id)) return json({ error: "task: the build the verdict is on (request_status and review_context name it)" }, 400);
-  const counted = await dayCount(env, a.contributor.login, "drafts");
+  const counted = await dayCount(env, a.contributor, "drafts");
   if (counted) return counted;
   let task: number | null = null, facts: string;
   if (verdict === "block") {
@@ -622,6 +622,6 @@ export async function handleConfirm(id: string, url: URL, request: Request, env:
 
 /** The claim or the release through an agent: the day's count first (a release counts as a claim), then the web's own handler, with the agent on its row, its record and its line. */
 export async function agentClaimOrRelease(a: AgentCaller, id: number, request: Request, env: Env, handle: (c: Contributor, id: number, request: Request, env: Env, through?: Through) => Promise<Response>): Promise<Response> {
-  const counted = await dayCount(env, a.contributor.login, "claims");
+  const counted = await dayCount(env, a.contributor, "claims");
   return counted ?? handle(a.contributor, id, request, env, a.through);
 }

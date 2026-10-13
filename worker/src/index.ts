@@ -410,7 +410,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (method === "POST" && path === "/factory/packages") {
       const a = await agentOf(request, env, "contribute", { write: true });
       if (a instanceof Response) return a;
-      return (await dayCount(env, a.contributor.login, "requests")) ?? handleRequestPackage(a.contributor, request, env, fetch, a.through);
+      return (await dayCount(env, a.contributor, "requests")) ?? handleRequestPackage(a.contributor, request, env, fetch, a.through);
     }
     if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(build|release)$/)) && method === "POST") {
       const a = await agentOf(request, env, "review", { write: true });
