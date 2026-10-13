@@ -159,13 +159,13 @@ export function isDue(rule: Rule, runs: RunSummary[], now: Date): { due: boolean
 }
 
 /**
- * The factory queue lives in D1; workers run on the maintainers' machines —
- * the project's own host (RUNBOOK, *The Studio host*) or a maintainer's
- * host (#343: contributors run no worker).
- * Per architecture: what is queued for a project worker, and how many are
- * alive and idle. Nothing starts a worker: GitHub runs CI and the release
- * only, so when no project worker is alive the jobs wait and the log says
- * so (the Workers page too).
+ * The factory queue lives in D1; the work runs on the maintainers' hosts
+ * (#343: contributors run no worker; #346: the legacy registrations retired),
+ * whose registrations hold project trust.
+ * Per architecture: what is queued for a project-trusted registration, and
+ * how many are alive and idle. Nothing starts a host: GitHub runs CI and the
+ * release only, so when no host is alive the jobs wait and the log says so
+ * (the Workers page too).
  */
 export async function factoryDemand(env: Env, now = new Date()): Promise<{ arch: string; queued: number; alive: number; pool: number }[]> {
   // "alive" here means alive *and idle*: a worker busy with a nine-hour
@@ -303,8 +303,8 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
   }
   try {
     for (const d of await factoryDemand(env, now)) {
-      if (d.alive > 0) log.push(`factory ${d.arch}: ${d.queued} queued, ${d.alive} idle project worker(s)`);
-      else log.push(`factory ${d.arch}: ${d.queued} queued task(s) wait — no project worker of that architecture is alive`);
+      if (d.alive > 0) log.push(`factory ${d.arch}: ${d.queued} queued, ${d.alive} idle host(s)`);
+      else log.push(`factory ${d.arch}: ${d.queued} queued task(s) wait — no host of that architecture is alive`);
     }
   } catch (e) {
     log.push(`factory workers: ${String(e)}`);

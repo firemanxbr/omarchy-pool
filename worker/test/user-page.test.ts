@@ -1,7 +1,7 @@
 /**
  * A person's page, drawn: the page's own button makers and blocks
  * (src/pages/user.ts — renderTop, renderRegister, buildBtn, removeBtn,
- * workerActs, withdrawBtn, pkgBlock, archLine, drawPackages, poolCap) and
+ * workerActs, revokeWords, withdrawBtn, pkgBlock, archLine, drawPackages, poolCap) and
  * the shell's log icon run over the fixture for every role, from the same
  * two answers the browser has — /auth/me for who is looking and GET
  * /users/alice/can for what they may do here. The rule it proves is the
@@ -12,9 +12,11 @@
  * architecture and its Build, drawn without opening anything, the story
  * and the builds folded under it behind one control; a worker's row has
  * Drain beside Revoke; a host's row the way to its page's pool cap. One
- * exception, the last block below (#331): "Run a worker" and the worker
- * form are a maintainer's, drawn for a maintainer only; everyone else
- * keeps the served line that their packages build on the pool's hosts. The
+ * exception, the last block below (#331, #346): where a maintainer's machine
+ * goes — a host — is drawn for a maintainer on their own page only, and no
+ * worker form for anyone (no legacy registration is made any more);
+ * everyone else keeps the served line that their packages build on the
+ * pool's hosts. The
  * script is the served page's, run as a browser would (runScript in
  * test/fixture.ts); the build page's Decision cell is decision-cell.test.ts.
  */
@@ -60,6 +62,7 @@ interface Drawn {
   buildBtn(name: string, arch: string | null, stopped: string | null, title: string): string;
   removeBtn(name: string): string;
   workerActs(w: unknown): string;
+  revokeWords(w: unknown): string;
   withdrawBtn(a: unknown, standing: boolean): string;
   wtLog(w: unknown): string;
   pkgBlock(p: unknown): string;
@@ -74,7 +77,7 @@ async function drawn(login = F.owner): Promise<Drawn> {
   expect(page.status).toBe(200);
   return runScript(scriptOf(page.text), {
     pathname: `/user/${login}`,
-    functions: ["identity", "renderTop", "renderRegister", "renderPoolLine", "buildBtn", "removeBtn", "workerActs", "withdrawBtn", "wtLog", "pkgBlock", "archLine", "drawPackages", "poolCap"],
+    functions: ["identity", "renderTop", "renderRegister", "renderPoolLine", "buildBtn", "removeBtn", "workerActs", "revokeWords", "withdrawBtn", "wtLog", "pkgBlock", "archLine", "drawPackages", "poolCap"],
     variables: ["CAN", "WHO", "PKGS", "BUILDS", "OPEN", "STORIES"],
   }) as Drawn;
 }
@@ -267,6 +270,24 @@ describe("a worker's row: Drain beside Revoke, and the way to its page (#412)", 
     expect(control(d.workerActs(reg), "Operate →")).toEqual(expect.objectContaining({ grey: false, href: `/hosts/${F.host}#hp-operate`, title: "its host's page: Suspend, Resume, Retire, Drain" }));
   });
 
+  it("the card says it lists each host's own registration and any legacy one not revoked yet, and the Revoke dialog says what follows for each: a host is stopped on its host's page, a legacy one is not replaced (#346)", async () => {
+    // The card's words, served: both kinds of row, never "legacy registrations … until they are retired" over a host's own.
+    const served = (await get(`/user/${F.m1}`, "")).text.replace(/<script\b[\s\S]*?<\/script>/g, "");
+    expect(served).toContain("The registrations under this name: each host's own, whose Operate → opens its host's page, and any legacy one from before hosts until it is revoked (#346).");
+    expect(served).not.toContain("The legacy registrations under this name");
+    const laptop = (await get("/api/v1/factory?limit=50", "")).json.workers.find((w: any) => w.id === F.ownerWorker);
+    expect(laptop.kind).toBe("legacy");
+    const SAID = "Its token stops working at once; a build it holds finishes on its own. Its history stays on its page.";
+    // A legacy registration: nothing replaces it, a machine joins as a host.
+    expect(d.revokeWords(laptop)).toBe(`${SAID} No new registration replaces it (#346): a machine joins as a host.`);
+    // A host's own: the way to stop a host is its host's page — no word that a host's registration is a legacy one to retire.
+    const reg = { ...laptop, kind: "host", host_id: F.host };
+    expect(d.revokeWords(reg)).toBe(`${SAID} It is a host's registration: a host is drained, suspended or retired on its host's page.`);
+    expect(d.revokeWords(reg)).not.toContain("#346");
+    // A row the listing no longer holds: only what every revoke shares.
+    expect(d.revokeWords(null)).toBe(SAID);
+  });
+
   it("after a Drain, the row is drawn again with the rights that come back, whichever of the two reads lands first", async () => {
     const laptop = (await get("/api/v1/factory?limit=50", "")).json.workers.find((w: any) => w.id === F.ownerWorker);
     const drained = { ...laptop, drained: { at: "2026-10-12T10:00:00.000Z", by: "m1", reason: "a disk to replace" } };
@@ -442,7 +463,7 @@ describe("the page is drawn with the v1 kit (#412), as the redesigned pages are"
   });
 });
 
-describe("the workers are the maintainers' (#331): \"Run a worker\" and the worker form are drawn for a maintainer only; everyone else reads that their packages build on the pool's hosts", () => {
+describe("the workers are the maintainers' hosts (#331, #346): no worker form for anyone; a maintainer on their own page reads that their machine joins as a host; everyone else reads that their packages build on the pool's hosts", () => {
   const LINE = `Nothing to run here: ${POOL_HOSTS}, which the maintainers provide.`;
 
   it("served: the line and the way to the packaging docs, for everyone — no form, no toggle, no \"Run a worker\" in the page itself", async () => {
@@ -472,13 +493,14 @@ describe("the workers are the maintainers' (#331): \"Run a worker\" and the work
     expect(await section("bob", F.contributor)).toEqual({ slot: "", own: "", form: "" });
   });
 
-  it("a maintainer: \"Run a worker\", the toggle and the form — live on their own page, and nothing drawn on anyone else's", async () => {
+  it("a maintainer: where their machine goes — a host — and that no legacy registration is made any more, on their own page only; no toggle, no form", async () => {
     const own = await section("m1", F.m1);
-    expect(own.slot).toContain('id="w-toggle"');
-    expect(own.own).toContain('<a href="/docs/workers">Run a worker →</a>');
-    expect(own.own).toContain('<form id="worker-form"');
+    expect(own.slot).toBe("");
+    expect(own.form).toBe("");
     expect(own.own).toContain("Maintainers only");
-    expect(controls(own.form)).toEqual([expect.objectContaining({ text: "Register worker", grey: false })]);
+    expect(own.own).toContain("The legacy registrations from before hosts retired with P3 (#346)");
+    expect(own.own).toContain('<a href="/docs/worker-host#maintainer-hosts">How a host joins →</a>');
+    for (const absent of ['id="worker-form"', 'id="w-toggle"', "Register worker", 'href="/docs/workers">Run a worker']) expect(own.own + own.slot, absent).not.toContain(absent);
     // A contributor's page and another maintainer's: the served line stays, nothing is drawn over it — no form greyed with a reason that is not alice's.
     expect(await section("m1", F.owner)).toEqual({ slot: "", own: "", form: "" });
     expect(await section("m1", F.m2)).toEqual({ slot: "", own: "", form: "" });
