@@ -541,9 +541,33 @@ stopped task's heartbeat, upload and fail refused without asking the pool
 `409` without `stop` and a `503` leaving the hold; a builder from before
 #277, and one of its first part (orders, but no `stop-task`), keeping its
 hold; and a broker started fresh never adopting a task
-whose view, read past the edge cache, carries `stop_order`.
+whose view, read past the edge cache, carries `stop_order`. A provider
+that refuses (an HTTP provider's 401 for the key an agent sidecar holds;
+#319) is answered with its own status and a message without the provider's
+body (which may quote part of the key), never a connection dropped without
+an answer, and agent.py behind the broker raises it at once, so a task's log
+says why.
 `python3 tests/agent-claude-code.py` runs the claude-code provider against
 a fake `claude`.
+
+`bash tests/worker-task-mode.sh` (CI, a real engine) runs the build script's
+`--task` mode (#335) in a container with a task's mounts and capabilities:
+a trial's helper that passes and one that fails, the log cut at its cap with
+a marker and the task's own status kept, a late agent sidecar waited for, a
+kind it does not know, and a verdict whose error carries quotes and
+backslashes still JSON. And an audit (#319): with the model environment the
+dispatcher gives every model kind (the placeholder `via-agent-sidecar` as
+its key) and a fake agent sidecar on `127.0.0.1:8790`, the auditor's calls
+reach the sidecar carrying the placeholder, and `audit.json` and `audit.md`
+are written, the placeholder never in the log. On the code before #319 the
+auditor ran without `with_secrets`, so `hold_secrets` had kept the key from
+it, and it stopped on "FACTORY_PROVIDER=anthropic but ANTHROPIC_API_KEY is
+not set" before any call, as task 1627 did on the first audit run on a host.
+`pkg-repo`'s spec test
+`an_audit_reaches_its_model_through_the_agent_sidecar_as_a_draft_does`
+holds both sides: an audit's container gets the same agent environment as
+a draft's and no other key, and every model tool the script runs
+(`draft-pkgbuild`, `audit-pkgbuild`) runs through `with_secrets`.
 
 `bash tests/worker-resources.sh` (CI, a real engine) runs the build
 script's own `ram_anon`, `resources_begin` and `resources_end` (#330, D31)
@@ -1011,7 +1035,13 @@ on CI's runners) only once tasks 1 and 2 were judged: their gateway is closed
 by what the dispatcher asks of the engine alone (#336, #372), and both task
 networks are read back as the engine keeps them — internal, with docker's
 isolated gateway mode, or on podman with DNS off and no gateway in their
-subnet; a stop removes only that task's container, sidecars and network. CI
+subnet; a stop removes only that task's container, sidecars and network.
+And an audit (#319) runs as a draft does: the real build script's `--task`
+and this commit's auditor on a staged build the stub pool serves, its key
+the placeholder alone, its completion reaching the provider through its own
+agent sidecar and coming back as the provider's refusal of the sidecar's key
+(`HTTP Error 401`), not the "ANTHROPIC_API_KEY is not set" it stopped on in
+the task container before. CI
 runs it on docker only. `RUNTIME=podman` runs it on podman, by hand, the
 dispatcher then taking docker's CLI on podman's API socket as the worker image
 does on a podman host (`PODMAN_SOCKET`, or a `podman system service` of the

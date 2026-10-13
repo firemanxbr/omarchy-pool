@@ -21,6 +21,7 @@ stop-task), keeps its hold. And an agent sidecar (#336): one task's for its
 whole life, its calls, tokens and wall time capped, what it spent written
 to BROKER_USAGE_FILE at start and after every completion.
 Run: python3 tests/broker.py"""
+import io
 import json
 import os
 import sys
@@ -49,6 +50,9 @@ def fake_complete(system, user, max_tokens=4000, timeout=300):
     seen.append({"system": system, "user": user, "max_tokens": max_tokens})
     if user == "boom":
         raise SystemExit("claude-code: You've hit your limit")
+    if user == "refused":
+        # An HTTP provider that refuses the key (an agent sidecar's, #319): its body may quote part of the key.
+        raise urllib.error.HTTPError("https://api.anthropic.com/v1/messages", 401, "Unauthorized", None, io.BytesIO(b'{"error":"invalid x-api-key sk-ant-abc***"}'))
     return "OK from the fake", "claude-sonnet-5"
 
 
@@ -202,11 +206,20 @@ assert status == 200 and out["ok"] is True and out["agent"] == "claude-code/clau
 # 3. A failing agent is a 502 with the reason.
 status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "boom"}]})
 assert status == 502 and "hit your limit" in out["error"]["message"], out
+# 3b. A provider that refuses (#319): its own status, an answer and not a dropped connection, its body kept here.
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "refused"}]})
+assert status == 401 and out["error"]["message"] == "the provider answered HTTP 401", out
 
 # 4. agent.py end to end, the way a builder is configured — and its probe names the agent behind the broker.
 os.environ.update({"FACTORY_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "via-broker", "ANTHROPIC_BASE_URL": base})
 text, model = agent.complete("You draft.", "a PKGBUILD please", max_tokens=100)
 assert (text, model) == ("OK from the fake", "claude-sonnet-5"), (text, model)
+# A refusal reaches agent.py as the provider's status, at once (a 401 is not waited out): what an audit's log then says.
+try:
+    agent.complete("You audit.", "refused", max_tokens=100)
+    raise AssertionError("a refused key answered")
+except urllib.error.HTTPError as e:
+    assert e.code == 401, e.code
 ok, detail = agent.probe()
 assert ok and detail["agent"] == "claude-code/claude-sonnet-5" and detail["provider"] == "anthropic", detail
 

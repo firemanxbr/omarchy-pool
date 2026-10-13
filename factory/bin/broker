@@ -473,6 +473,16 @@ class Handler(BaseHTTPRequestHandler):
             except SystemExit as e:
                 SPENT.add(agent.USAGE["tokens"])
                 return self._json(502, {"type": "error", "error": {"type": "api_error", "message": str(e)[:1000]}})
+            except urllib.error.HTTPError as e:
+                # The provider's refusal (a key it does not take, a request it will not serve) is an answer
+                # with its own status, not a connection dropped without one, so the task's log says why.
+                # Its body stays here: a provider may quote part of the key it refused.
+                SPENT.add(agent.USAGE["tokens"])
+                code = e.code if 400 <= e.code < 600 else 502
+                return self._json(code, {"type": "error", "error": {"type": "api_error", "message": f"the provider answered HTTP {e.code}"}})
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                SPENT.add(agent.USAGE["tokens"])
+                return self._json(502, {"type": "error", "error": {"type": "api_error", "message": f"the provider: {type(e).__name__}: {str(e)[:500]}"}})
             # What the provider counted; about four characters a token when it said nothing.
             SPENT.add(agent.USAGE["tokens"] or (len(system) + len(user) + len(text or "")) // 4)
         # `agent` is not the API's: it says who really answered, for the probe behind this broker.

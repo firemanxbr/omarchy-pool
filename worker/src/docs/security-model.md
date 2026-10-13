@@ -287,7 +287,12 @@ secret). Everything travels in the `Authorization` header over TLS only.
   attempt given back twice per task, spent after: a package that only
   non-granting hosts claim fails rather than run on an unprobed bridge). A task that needs a model
   gets an agent sidecar of its own, on its network only, with the keys file
-  read-only and its caps (calls, tokens, wall time). The file stays 0600 and
+  read-only and its caps (calls, tokens, wall time). The task container
+  holds only the sidecar's address and a placeholder for the key
+  (`via-agent-sidecar`), which the build script keeps from every child
+  (`hold_secrets`) and lends to its two model tools alone, the drafter and
+  the auditor (`with_secrets`; the auditor was not until #319, and every
+  audit on a host stopped before its first call). The file stays 0600 and
   the agent user's, and the sidecar keeps every capability dropped and no new
   privileges, so it runs as that owner as the engine shows it (#399): the
   agent's uid on a rootful engine, root on a rootless one (whose root is the
