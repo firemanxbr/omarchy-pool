@@ -2028,6 +2028,107 @@ mod tests {
         }
     }
 
+    /// The `-e` values of a task container's `run`, in order.
+    fn env_in(run: &[String]) -> Vec<String> {
+        run.windows(2)
+            .filter(|w| w[0] == "-e")
+            .map(|w| w[1].clone())
+            .collect()
+    }
+
+    /// An audit reaches its model the way a draft does (#319): its container is given the
+    /// same agent environment — the provider, the agent sidecar's address, the placeholder as
+    /// its key, GitHub through the sidecar — and no other key; and the build script it runs
+    /// lends that environment to the auditor as it does to the drafter. The script holds
+    /// `ANTHROPIC_API_KEY` back from every child (`hold_secrets`) and gives it back only through
+    /// `with_secrets`: the first audit on a host (task 1627, 2026-10-13) ran `audit-pkgbuild`
+    /// without it, and `agent.py` stopped on "`FACTORY_PROVIDER=anthropic` but `ANTHROPIC_API_KEY`
+    /// is not set" — three attempts, every audit on every host since the Studio switch.
+    #[test]
+    fn an_audit_reaches_its_model_through_the_agent_sidecar_as_a_draft_does() {
+        let (tdir, rel, work) = dirs();
+        let env_of_kind = |kind: Kind| {
+            let s = spec(kind, &tdir, &rel);
+            let p = plan(&s).unwrap();
+            check_plan(&p, &work, want(&s)).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            env_in(&task_of(&p))
+        };
+        let audit = env_of_kind(Kind::Audit);
+        let draft = env_of_kind(Kind::ModelBuild);
+        let agent = "http://10.231.0.51:8790";
+        let model_env = [
+            "FACTORY_PROVIDER=anthropic".to_owned(),
+            format!("ANTHROPIC_BASE_URL={agent}"),
+            format!("ANTHROPIC_API_KEY={AGENT_KEY_PLACEHOLDER}"),
+            format!("GITHUB_API={agent}/github"),
+        ];
+        for want in &model_env {
+            assert!(
+                audit.contains(want),
+                "the audit's container lacks {want}: {audit:?}"
+            );
+        }
+        let model_part = |env: &[String]| -> Vec<String> {
+            env.iter()
+                .filter(|e| {
+                    let k = e.split_once('=').map_or(e.as_str(), |(k, _)| k);
+                    k.starts_with("ANTHROPIC_") || k == "FACTORY_PROVIDER" || k == "GITHUB_API"
+                })
+                .cloned()
+                .collect()
+        };
+        assert_eq!(
+            model_part(&audit),
+            model_part(&draft),
+            "an audit and a draft talk to their agent sidecar alike"
+        );
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.starts_with("NO_PROXY=") && e.ends_with(",10.231.0.51")),
+            "the agent sidecar is reached around the egress: {audit:?}"
+        );
+        for e in &audit {
+            let k = e.split_once('=').map_or(e.as_str(), |(k, _)| k);
+            assert!(
+                !(k.contains("KEY") || k.contains("TOKEN")) || *e == model_env[2],
+                "a key in the audit's container: {e}"
+            );
+        }
+
+        // The script's side: the key the spec gives is one with_secrets lends back, and every
+        // model tool the script runs is run through it — the drafter's turns and the auditor alike.
+        let script = include_str!("../../../../factory/worker/omarchy-build-worker.sh");
+        let agent_vars = script
+            .lines()
+            .find_map(|l| l.strip_prefix("AGENT_VARS=("))
+            .expect("AGENT_VARS in the build script");
+        assert!(
+            agent_vars
+                .split_whitespace()
+                .any(|v| v == "ANTHROPIC_API_KEY"),
+            "with_secrets does not lend ANTHROPIC_API_KEY: {agent_vars}"
+        );
+        assert!(
+            script.lines().any(|l| l.trim() == "hold_secrets"),
+            "the script no longer holds its secrets back; this test's premise moved"
+        );
+        for tool in ["draft-pkgbuild", "audit-pkgbuild"] {
+            let runs: Vec<&str> = script
+                .lines()
+                .map(str::trim_start)
+                .filter(|l| !l.starts_with('#') && l.contains("python3") && l.contains(tool))
+                .collect();
+            assert!(!runs.is_empty(), "the script never runs {tool}");
+            for l in runs {
+                assert!(
+                    l.starts_with("with_secrets python3 "),
+                    "{tool} runs without the agent's environment (with_secrets): {l}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn only_a_container_on_an_emulated_lane_is_told_so_and_its_platform_is_the_lanes() {
         let (tdir, rel, work) = dirs();

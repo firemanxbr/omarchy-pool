@@ -2,7 +2,10 @@
 """factory/bin/broker against a fake agent and a fake pool: the Anthropic
 Messages shape in, the agent's answer out (who really answered, for the
 probe); the probe on /health; an agent failure as a 502 the client
-(agent.py's anthropic path) understands; agent.py end to end through it;
+(agent.py's anthropic path) understands; a provider's refusal as its own
+status, or as a 424 naming it when the broker has already waited it out
+(a 429, a 5xx) or the provider never answered, which the client does not
+wait out again (#319); agent.py end to end through it;
 GitHub read-only with the token added here; and the pool's calls for one
 task at a time — the worker's token added here, the job token never handed
 on, another task's id refused, complete releasing the hold; and the orders
@@ -21,6 +24,7 @@ stop-task), keeps its hold. And an agent sidecar (#336): one task's for its
 whole life, its calls, tokens and wall time capped, what it spent written
 to BROKER_USAGE_FILE at start and after every completion.
 Run: python3 tests/broker.py"""
+import io
 import json
 import os
 import sys
@@ -49,6 +53,15 @@ def fake_complete(system, user, max_tokens=4000, timeout=300):
     seen.append({"system": system, "user": user, "max_tokens": max_tokens})
     if user == "boom":
         raise SystemExit("claude-code: You've hit your limit")
+    if user == "refused":
+        # An HTTP provider that refuses the key (an agent sidecar's, #319): its body may quote part of the key.
+        raise urllib.error.HTTPError("https://api.anthropic.com/v1/messages", 401, "Unauthorized", None, io.BytesIO(b'{"error":"invalid x-api-key sk-ant-abc***"}'))
+    if user in ("quota", "down"):
+        # What agent.complete raises once it has waited a 429 or a 5xx out (30, 60, 120 s): the provider's last word.
+        code = 429 if user == "quota" else 503
+        raise urllib.error.HTTPError("https://api.anthropic.com/v1/messages", code, "Busy", None, io.BytesIO(b'{"error":"busy"}'))
+    if user == "unreachable":
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
     return "OK from the fake", "claude-sonnet-5"
 
 
@@ -202,11 +215,49 @@ assert status == 200 and out["ok"] is True and out["agent"] == "claude-code/clau
 # 3. A failing agent is a 502 with the reason.
 status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "boom"}]})
 assert status == 502 and "hit your limit" in out["error"]["message"], out
+# 3b. A provider that refuses (#319): its own status, an answer and not a dropped connection, its body kept here.
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "refused"}]})
+assert status == 401 and out["error"]["message"] == "the provider answered HTTP 401", out
+# 3c. A refusal the broker has already waited out — a 429 or a 5xx (agent.RETRIED) — or no answer at all is a 424, which
+# agent.py does not retry, naming what the provider said: never its own 429 or 503, which the client behind would wait
+# out again, each of its rounds another whole cycle here and another call of the task's cap.
+for word, said in (("quota", "the provider answered HTTP 429 after the broker's retries"), ("down", "the provider answered HTTP 503 after the broker's retries"), ("unreachable", "the provider: URLError")):
+    status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": word}]})
+    assert status == 424 and out["error"]["message"].startswith(said), (word, status, out)
+assert 424 not in agent.RETRIED and 401 not in agent.RETRIED and {429, 503} <= set(agent.RETRIED), agent.RETRIED
+
 
 # 4. agent.py end to end, the way a builder is configured — and its probe names the agent behind the broker.
+class NoWait:
+    """agent.py's clock for what follows: a wait is a failure, the broker having waited the refusal out already."""
+
+    def __init__(self, real):
+        self.real = real
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def sleep(self, s):
+        raise AssertionError(f"agent.py behind the broker waited {s} s for a refusal the broker had already waited out")
+
+
 os.environ.update({"FACTORY_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "via-broker", "ANTHROPIC_BASE_URL": base})
 text, model = agent.complete("You draft.", "a PKGBUILD please", max_tokens=100)
 assert (text, model) == ("OK from the fake", "claude-sonnet-5"), (text, model)
+# A refusal reaches agent.py at once, never waited out here: the provider's own status where agent.py would not retry it
+# (a 401), a 424 naming the provider's where it would and the broker already has (a 429), or where the provider never
+# answered. What an audit's log then says (its last line: the HTTPError's status and reason).
+agent.time = NoWait(agent.time)
+try:
+    for word, code, said in (("refused", 401, "HTTP Error 401: Unauthorized"), ("quota", 424, "HTTP Error 424: the provider answered HTTP 429 after the broker's retries"),
+                             ("unreachable", 424, "HTTP Error 424: no answer from the provider (URLError)")):
+        try:
+            agent.complete("You audit.", word, max_tokens=100)
+            raise AssertionError(f"{word}: answered")
+        except urllib.error.HTTPError as e:
+            assert e.code == code and str(e) == said, (word, e.code, str(e))
+finally:
+    agent.time = agent.time.real
 ok, detail = agent.probe()
 assert ok and detail["agent"] == "claude-code/claude-sonnet-5" and detail["provider"] == "anthropic", detail
 

@@ -127,6 +127,11 @@ def available():
     return provider() is not None
 
 
+# What _open waits out. A broker answers a refusal it has already waited out
+# with a status outside these, so the client behind it does not wait it out again.
+RETRIED = (429, 500, 502, 503, 504)
+
+
 def _open(req, timeout):
     """urlopen with patience: a 429 (the free tier's requests per minute, a
     quota) or a 5xx is waited out — 30 s, 60 s, 120 s, Retry-After when the
@@ -138,7 +143,7 @@ def _open(req, timeout):
         try:
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
-            if wait is None or e.code not in (429, 500, 502, 503, 504):
+            if wait is None or e.code not in RETRIED:
                 raise
             retry_after = e.headers.get("Retry-After") if e.headers else None
             try:
