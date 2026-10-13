@@ -16,15 +16,16 @@
  *
  * What a call costs: one read of the grant by its unique index, joined to
  * the login's row by its primary key — the role is read again on every call,
- * so a login taken out of factory/MAINTAINERS.toml loses review and block at
- * its next call. Then the login's burst limit (a rate limiting binding: no
- * D1 row), the scope, the role, and for a write the cost guard (through the
- * read guard's one-minute memo: no row either). `last_used` moves once per
- * ten minutes, as a contributor's `last_seen` does.
+ * so a login taken out of factory/MAINTAINERS.toml loses review and block,
+ * and a maintainer's fifty requests a day (DAY_CAPS), at its next call.
+ * Then the login's burst limit (a rate limiting binding: no D1 row), the
+ * scope, the role, and for a write the cost guard (through the read guard's
+ * one-minute memo: no row either). `last_used` moves once per ten minutes,
+ * as a contributor's `last_seen` does.
  */
 import { json, type Env } from "./index";
 import { cookieOf } from "./routes/auth";
-import { sha256Hex, SEEN_MINUTES, type Contributor } from "./routes/contributors";
+import { isMaintainer, sha256Hex, SEEN_MINUTES, type Contributor } from "./routes/contributors";
 import { agentWriteGuard } from "./cost";
 
 /** The three scopes a grant may hold: contribute (request_package, request_status), review (review_claim, review_release, review_context, submit_review) and block (block). */
@@ -50,9 +51,17 @@ export const LIVE_GRANTS = 3;
 export const CODE_SECONDS = 60;
 /** A draft's life: confirmed within thirty minutes, or expired. */
 export const DRAFT_MINUTES = 30;
-/** Per login, per UTC day, across all its grants and agent names: requests, claims (a release counts as one) and drafts. */
-export const DAY_CAPS = { requests: 5, claims: 10, drafts: 30 } as const;
-export type DayKind = keyof typeof DAY_CAPS;
+/**
+ * Per login, per UTC day, across all its grants and agent names: requests,
+ * claims (a release counts as one) and drafts — and a maintainer's requests
+ * (factory/MAINTAINERS.toml): fifty, where everyone else's agent makes five.
+ */
+export const DAY_CAPS = { requests: 5, claims: 10, drafts: 30, maintainer_requests: 50 } as const;
+export type DayKind = "requests" | "claims" | "drafts";
+/** The cap that applies to this login: a maintainer's requests are DAY_CAPS.maintainer_requests, by the role agentOf read with the grant — no row more. */
+export function dayCap(kind: DayKind, c: Contributor): number {
+  return kind === "requests" && isMaintainer(c) ? DAY_CAPS.maintainer_requests : DAY_CAPS[kind];
+}
 /** The bursts (wrangler.toml's rate limiting bindings): per login, per address on the token swap. Said in the refusals. */
 export const CALLS_PER_MINUTE = 20;
 export const SWAPS_PER_MINUTE = 5;
@@ -281,13 +290,21 @@ export function daySql(kind: DayKind): string {
  WHERE login = ?2 AND (agent_day IS NOT ?1 OR ${col} < ?3)`;
 }
 
-/** The day's count moved before the write, or the 429 to send (with the seconds to the next UTC day). A write the handler then refuses has still counted. */
-export async function dayCount(env: Env, login: string, kind: DayKind, now = new Date()): Promise<Response | null> {
-  const res = await env.DB.prepare(daySql(kind)).bind(utcDay(now), login, DAY_CAPS[kind]).run();
+/**
+ * The day's count moved before the write, or the 429 to send (with the
+ * seconds to the next UTC day), its words and `limit` the cap that applied
+ * to the login (dayCap). The words say the cap, not a count: a login taken
+ * out of factory/MAINTAINERS.toml after its sixth request today is refused
+ * at five with more than five on its row. A write the handler then refuses
+ * has still counted.
+ */
+export async function dayCount(env: Env, c: Contributor, kind: DayKind, now = new Date()): Promise<Response | null> {
+  const cap = dayCap(kind, c);
+  const res = await env.DB.prepare(daySql(kind)).bind(utcDay(now), c.login, cap).run();
   if (res.meta.changes) return null;
   const tomorrow = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
   const words = { requests: "requests", claims: "claims and releases", drafts: "drafts" }[kind];
-  return json({ error: `${login} made ${DAY_CAPS[kind]} ${words} through agents today (UTC): the next one is taken tomorrow`, code: "day_limit", limit: DAY_CAPS[kind] }, 429, { "retry-after": String(Math.max(1, Math.ceil((tomorrow - now.getTime()) / 1000))) });
+  return json({ error: `${c.login} reached today's cap of ${cap} ${words} through agents (UTC): the next one is taken tomorrow`, code: "day_limit", limit: cap }, 429, { "retry-after": String(Math.max(1, Math.ceil((tomorrow - now.getTime()) / 1000))) });
 }
 
 /**

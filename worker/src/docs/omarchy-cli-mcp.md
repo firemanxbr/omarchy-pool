@@ -653,7 +653,7 @@ agent drafts with (*What the server enforces*). A release decides nothing
 either: the rebuild stops, and the package waits for a claim again. A
 request is the person's own; the four confirmations are passed by the agent
 after it asks the person, the record says they came through an agent, and
-the day's five requests still hold.
+the day's five requests (fifty for a maintainer) still hold.
 
 ### Signed and journaled
 
@@ -702,14 +702,18 @@ the day's five requests still hold.
   over it costs that row and nothing more. Both answer 429 with
   `retry-after`.
 - **Per day, per person.** Five requests, ten claims, thirty drafts for each
-  login, across all its grants and agent names. A release counts as a claim:
-  claiming and letting go share the ten, so an agent that claims and releases
-  in a loop stops at the cap. The counts live in the person's `contributors`
-  row (`agent_day` and the three counts), not in a grant's, so logging in
-  again or naming another agent starts no new count. A conditional update on
-  the primary key moves the count before the write; when it changes no row,
-  the write is not made and the answer is 429 with `retry-after` (the seconds
-  to the next UTC day) and `code: "day_limit"`. A write the handler then
+  login, across all its grants and agent names; a maintainer's agent
+  (`factory/MAINTAINERS.toml`) makes fifty requests. The role is the one the
+  grant's read already joins, so the larger cap reads no row more, and a login
+  taken out of the file is back at five at its next call. A release counts as
+  a claim: claiming and letting go share the ten, so an agent that claims and
+  releases in a loop stops at the cap. The counts live in the person's
+  `contributors` row (`agent_day` and the three counts), not in a grant's, so
+  logging in again or naming another agent starts no new count. A conditional
+  update on the primary key moves the count before the write; when it changes
+  no row, the write is not made and the answer is 429 with `retry-after` (the
+  seconds to the next UTC day), `code: "day_limit"` and `limit`, the cap that
+  applied to the login, which its words say too. A write the handler then
   refuses has still counted, so an agent that loops on a refusal stops at the
   cap. A person's own writes on the web or with `omc_` are not counted.
 - **The route without a credential.** `POST /auth/agent/token` writes only a
@@ -1030,7 +1034,11 @@ The Worker's side, in vitest on a real local D1
 - The limits answer 429: twenty calls a minute per login across its grants,
   five swaps a minute per address (the bindings themselves, in workerd); the
   day's counts are the login's, a new grant or another agent name does not
-  start them again, and a release counts toward the day's ten claims.
+  start them again, and a release counts toward the day's ten claims. A
+  maintainer's agent takes fifty requests and everyone else's five, the
+  429's `limit` and words saying which; a maintainer taken out of the file
+  with fifty on the row is refused at five at its next call. Claims and
+  drafts are ten and thirty for both.
 - With the cost guard up, an agent's write is answered 503 and a person's
   write on the web is not.
 - Text evidence answers `public, max-age=30` and `?tail=` gives its last
@@ -1066,7 +1074,8 @@ What is built follows the answers:
    the public journal records decisions, not drafts.
 7. **Limits.** As proposed: twenty calls a minute per login; five requests,
    ten claims and thirty drafts a day per person; three live grants per
-   login; five token swaps a minute per address.
+   login; five token swaps a minute per address. Since 2026-10-13 a
+   maintainer's agent makes fifty requests a day.
 8. **Signatures.** The pool's signature on every record is enough for now; a
    person's own can come later.
 9. **Order.** The tools are built after #242 and #247, so they take `name`

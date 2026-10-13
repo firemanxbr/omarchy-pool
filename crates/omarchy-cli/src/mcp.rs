@@ -81,7 +81,7 @@ fn write_tools() -> Vec<Value> {
     );
     vec![
         json!({ "name": "request_package", "title": "Request a package",
-          "description": "Requests a package from the pool's factory in the person's name, through the request form's own door and checks. Ask the person each of the four confirmations and pass them only as they answered: official — the URL is the project's own repository or its official release, not a fork or a mirror; license — the licence is the one the project declares (SPDX); unshipped — no upstream the pool mirrors ships it, and nobody else requested it; evidence — their build is evidence a maintainer learns from, never what users get. Not confirmed through a link; five a day. Follow it with request_status.",
+          "description": "Requests a package from the pool's factory in the person's name, through the request form's own door and checks. Ask the person each of the four confirmations and pass them only as they answered: official — the URL is the project's own repository or its official release, not a fork or a mirror; license — the licence is the one the project declares (SPDX); unshipped — no upstream the pool mirrors ships it, and nobody else requested it; evidence — their build is evidence a maintainer learns from, never what users get. Not confirmed through a link; five a day, fifty for a maintainer. Follow it with request_status.",
           "inputSchema": { "type": "object", "properties": {
               "url": { "type": "string", "pattern": "^https://", "description": "The project's GitHub repository, a release tarball, or its home page." },
               "description": { "type": "string", "minLength": 8, "maxLength": 120, "description": "One line: what pacman shows as pkgdesc." },
@@ -1385,7 +1385,7 @@ mod tests {
             ),
             (
                 "POST /api/v1/factory/drafts",
-                json!({ "__status": 429, "error": "bob made 30 drafts through agents today (UTC)", "code": "day_limit" }),
+                json!({ "__status": 429, "error": "bob reached today's cap of 30 drafts through agents (UTC)", "code": "day_limit" }),
             ),
         ]);
         let (config, api, creds) = session(&base, &["contribute", "review", "block"]);
@@ -1405,7 +1405,7 @@ mod tests {
             )["content"][0]["text"],
             "HTTP 409: nothing to release"
         );
-        assert_eq!(tool(&mut s, "block", &json!({ "name": "my-app", "reason": "abcd" }))["content"][0]["text"], "HTTP 429 (day_limit): bob made 30 drafts through agents today (UTC) — retry after 60 s");
+        assert_eq!(tool(&mut s, "block", &json!({ "name": "my-app", "reason": "abcd" }))["content"][0]["text"], "HTTP 429 (day_limit): bob reached today's cap of 30 drafts through agents (UTC) — retry after 60 s");
         // A package the story shows the project rebuilding: the claim is still sent, and the pool — which holds the rule, on facts
         // fresher than the edge's story — says why not in its words.
         assert_eq!(
