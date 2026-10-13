@@ -245,7 +245,7 @@ const AGENT_NEEDS: readonly NeedKind[] = ["linger", "credentials", "docker-group
  * journal line's status when a report changes the level (#407).
  */
 export function hostingShortOf(isolation: string | null, dedicated: number | null): string | null {
-  if (isolation === "root") return "isolation root: a rootful daemon without userns-remap — a task-container escape lands as root on the host; the Studio's recorded exception until P6, refused for a new host (prep-root.sh sets userns-remap on a new daemon)";
+  if (isolation === "root") return "isolation root: a rootful daemon without userns-remap — a task-container escape lands as root on the host; refused for a new host, a recorded exception beside a legacy set only (prep-root.sh sets userns-remap on a new daemon, and --remap-existing-daemon on one in use: the runbook's The Studio at subuid)";
   if (isolation === "user" && dedicated === 0) return "isolation user on a machine not dedicated to it: a rootless runtime at the user level runs only on a dedicated machine or VM — on a shared one, a dedicated Unix user with rootless podman at the subuid level";
   if (isolation === "vm-shared" && dedicated === 0) return "isolation vm-shared without --dedicated: Docker Desktop's or OrbStack's VM qualifies only with the home mount removed and its owner's word that nothing else runs in it";
   return null;

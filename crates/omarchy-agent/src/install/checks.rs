@@ -51,10 +51,11 @@ impl Report {
 /// The hosting requirement (decision D42, design v2 §19.1, §19.3): a dedicated machine
 /// or VM at any level (a rootful daemon of a new host with `userns-remap`), or a
 /// dedicated user on a shared machine at the `subuid` level. A maintainer's daily login —
-/// `user`, or any rootful daemon, without `--dedicated` — is refused. The Studio's
-/// rootful daemon without remapping, installed beside its legacy set (`--legacy`, or the
-/// `legacy.json` an earlier install recorded), is the recorded exception until P6. Any
-/// existing compose project named with `--legacy` grants it: it is meant for the Studio's
+/// `user`, or any rootful daemon, without `--dedicated` — is refused. A rootful daemon
+/// without remapping installed beside a legacy set (`--legacy`, or the `legacy.json` an
+/// earlier install recorded) is the recorded exception until P6, as the Studio's was until
+/// its move to `subuid` on 2026-10-13 (#407), whose way back still relies on it. Any
+/// existing compose project named with `--legacy` grants it: it was meant for the Studio's
 /// recorded set only, the warning and `rootful_exception` in `legacy.json` record it, and
 /// P6 removes it.
 ///

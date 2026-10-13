@@ -68,17 +68,19 @@ describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
     for (const gone of ["the-studio-canary", "the-studio-switch", "once-the-updater-277"]) expect(heads.map((h) => h.id), gone).not.toContain(gone);
   });
 
-  it("says the Studio is a host like any other: one bundle, 11 units on two lanes, isolation root as the recorded exception until P6", () => {
+  it("says the Studio is a host like any other: one bundle, 11 units on two lanes, isolation subuid since its move of 2026-10-13", () => {
     expect(studio).toContain("is a maintainer host like any other");
     expect(studio).toContain("11 units");
     expect(studio).toContain("aarch64 native, and x86_64 emulated under\nqemu (`page16k`)");
-    expect(studio).toContain("**Isolation `root`, a recorded exception until P6**");
+    expect(studio).toContain("**Isolation `subuid`, since 2026-10-13**");
+    expect(studio).not.toContain("**Isolation `root`");
     expect(studio).toContain("`/srv/omarchy-host`, a btrfs subvolume of its own");
     expect(studio).toContain("`10.232.0.0/16`");
     // Where its key and its token live, as the canary set them up: a file key, the Studio having no TPM (#330); the token's own
     // file in the set directory (#327), on the compose driver.
     expect(studio).toContain("`host.ed25519` in the agent's `state/`, a file: the Studio has no TPM");
-    expect(studio).toContain("`/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0600)");
+    // Its keys since the move: 0640, readable by the remapped sidecars' uid through the file's ACL alone (#405).
+    expect(studio).toContain("`/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0640, its owner's and readable by the agent sidecars' remapped uid 231069 through its ACL alone, #405)");
     expect(studio).toContain("`run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327)");
     // A build that dies of emulation goes back for a native host, its attempt given back.
     expect(studio).toContain("`needs_native`, #338");
@@ -212,6 +214,35 @@ describe("the runbook's Studio at subuid (#407)", () => {
     expect(i("the-studio-s-x86-64-vm")).toBeGreaterThan(0);
     expect(i("the-studio-s-x86-64-vm")).toBeLessThan(i("the-studio-at-subuid"));
     expect(i("the-studio-at-subuid")).toBeLessThan(i("its-legacy-set-retired"));
+  });
+
+  it("says the move was done on 2026-10-13 and what was observed, before the procedure, which stays the way to move another rootful host", () => {
+    expect(text).toContain("The Studio moved to `subuid` on 2026-10-13, in the root session below.");
+    expect(text).toContain("Until then its rootful docker ran without userns-remap, so a task container's root was the host's root");
+    expect(text).toContain("stays the way to move another host whose rootful daemon already holds images or containers");
+    // What was observed, in order, and all of it before the procedure's first step.
+    const observed = [
+      "**What was observed** on 2026-10-13 (UTC):",
+      "15:01:12, studio-m2 (host `h_2t7pul95fs`) drained, the root session ran `prep-root.sh --remap-existing-daemon` from v1.1.6's tree",
+      "docker 29.9.0 remaps users (`docker info` lists `name=userns`), its data root `/var/lib/docker/165536.165536`, storage driver overlay2",
+      "`dockremap`'s subordinate ids 165536–231071",
+      "`/etc/docker/daemon.json.pre-remap` with it: the way back of one day",
+      "The agent's install again (v1.1.6, agent 0.5.3, `--agent-env-from`, `--yes`) wrote the envelope's `userns_remap = true`",
+      "with the ACL `user::rw- user:231069:r-- group::--- mask::r-- other::---`",
+      "`etc/dispatcher.env` with `OMARCHY_AGENT_REMAPPED_USER=65533:65533` alone; `run/capacity.json` says `subuid`",
+      "15:08, the registration resumed; the pool's `hosts` row and `/api/v1/hosts/fleet` say isolation `subuid` (#431)",
+      "build 1639 (omarchy-cli, aarch64 native) staged from 15:12 to 15:16, and audit 1640 ran on studio-m2 from 15:16 to 15:17",
+      // What the section's own checks have not yet seen, and until when the way back stays open.
+      "**Still to be seen**, as of 2026-10-13: two items of *Check from the site* (below), the pool jobs (health, promote, security) on the remapped daemon — the #433 risk: if they fail there, the gate holds the rings — and a release reaching the host with no visit.",
+      "The way back stays open until 2026-10-14 ~15:00 UTC, one day after the 15:01 drain.",
+      "**What the remapping changes.**",
+      "**Before it**, from the site.",
+    ].map(at);
+    expect([...observed].sort((a, b) => a - b)).toEqual(observed);
+    // The ACL observed is the one step 6 checks for.
+    expect(text).toContain("getfacl -c /srv/omarchy-host-secrets/agent.env # user::rw- user:231069:r-- group::--- mask::r-- other::---");
+    // Nothing says the move is still to come.
+    for (const stale of ["Until this move the Studio's rootful docker runs", "the move to `subuid` is the Studio's next step", "the recorded exception until P6"]) expect(text, stale).not.toContain(stale);
   });
 
   it("drains the host, stops its agent and dispatcher, runs prep-root.sh's opt-in after its dry run, sets the build caches aside, then installs again, and resumes", () => {
@@ -353,15 +384,31 @@ describe("the runbook's Studio at subuid (#407)", () => {
     expect(reclaim).toContain("sudo snapper -c root list");
   });
 
-  it("The Studio host and prep-root.sh's paragraph say the recorded exception lasts until this move, the Studio's next step now that its legacy set is retired", () => {
+  it("The Studio host, prep-root.sh's paragraph and the known limits say the move was done on 2026-10-13, the recorded exception lasting until then", () => {
     const flat = (s: string) => s.replace(/\s+/g, " ");
     const host = flat(cut(runbook, "the-studio-host").split("\n### ")[0]);
-    expect(host).toContain("**Isolation `root`, a recorded exception until P6**");
-    expect(host).toContain("that set is retired (*Its legacy set, retired*, below), so nothing keeps the exception for a way back any more, and the move to `subuid` is the Studio's next step");
-    expect(host).toContain("P6 moves it to `subuid` in one root session, *The Studio at subuid* (below, #407)");
-    expect(host).toContain("after which the page says `subuid (dedicated)` and no *hosting* item");
-    expect(flat(runbook)).toContain("until the root session of *The Studio at subuid* (below) turns it on with that flag");
+    expect(host).toContain("**Isolation `subuid`, since 2026-10-13** (design v2 §19.1, §19.3, #407): rootful docker 29.9.0 with `userns-remap`");
+    expect(host).toContain("A task container's root is host uid 165536, the first of `dockremap`'s subordinate ids (165536–231071)");
+    expect(host).toContain("its page shows the level, `subuid (dedicated)`, and no *hosting* item");
+    expect(host).toContain("`/var/lib/docker/165536.165536`");
+    expect(host).toContain("Until that day it ran without remapping, isolation `root`: the recorded exception (D13)");
+    expect(host).toContain("P6's one root session moved it, *The Studio at subuid* (below)");
+    expect(host).toContain("Its agent sidecars run as 65533 inside, host uid 231069");
+    // Nothing says the Studio still runs at root, or that the move is still to come.
+    for (const stale of ["the move to `subuid` is the Studio's next step", "P6 moves it to `subuid`", "Until then its agent sidecars run as the agent's uid", "`root (dedicated)`"]) expect(host, stale).not.toContain(stale);
+    expect(flat(runbook)).toContain("until the root session of *The Studio at subuid* (below) turned it on with that flag on 2026-10-13");
     expect(runbook).not.toContain("`subuid` isolation is P6's");
+    expect(runbook).not.toContain("recorded exception until P6");
+    expect(runbook).not.toContain("(`root` is the Studio's");
+    expect(flat(runbook)).toContain("(`root` never meets it: refused for a new host, it is a recorded exception beside a legacy set only, as the Studio's was until its move to `subuid` on 2026-10-13;");
+    // The agent sidecars' table names the Studio on the row it is on now.
+    expect(runbook).toContain("| rootful docker without remapping (the Studio until 2026-10-13) |");
+    expect(runbook).toContain("| rootful docker with userns-remap (the Studio since 2026-10-13) |");
+    // The known limit is what holds now: subuid on a daemon still rootful, and the way back the retired record still allows.
+    const limits = flat(cut(runbook, "known-limits"));
+    expect(limits).not.toContain("The Studio's isolation is `root`");
+    expect(limits).toContain("**The Studio is `subuid` on a rootful daemon.** Since 2026-10-13 its docker remaps users (*The Studio at subuid*, #407)");
+    expect(limits).toContain("Its retired legacy record still carries the rootful exception (D13)");
     // The canary's and the switch's sections left with #404 (#346): nothing here points at them.
     expect(sec).not.toMatch(/\*The Studio (canary|switch)\*/);
   });

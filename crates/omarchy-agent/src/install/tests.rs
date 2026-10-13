@@ -281,7 +281,7 @@ fn a_daily_login_and_a_rootful_daemon_without_remapping_are_refused_with_the_rea
     assert!(b.contains("root-equivalent"), "{b}");
     let (b, _) = blocked(Isolation::Root, true, true, false);
     assert!(b.contains("needs userns-remap"), "{b}");
-    // The Studio: rootful without remapping beside its legacy set, a recorded exception.
+    // The Studio until 2026-10-13: rootful without remapping beside its legacy set, a recorded exception.
     let (b, w) = blocked(Isolation::Root, true, true, true);
     assert!(
         b.is_empty() && w.contains("exception until P6"),
@@ -4134,7 +4134,7 @@ fn preflight_names_a_missing_enrollment_token_and_a_unit_directory_others_may_wr
 
 #[test]
 fn a_rerun_without_legacy_uses_the_recorded_project_and_its_exception() {
-    // The Studio: rootful, no userns-remap, legacy.json recorded by the first install.
+    // The Studio until 2026-10-13: rootful, no userns-remap, legacy.json recorded by the first install.
     let rootful = INFO.replace(
         r#""SecurityOptions":["name=rootless"]"#,
         r#""SecurityOptions":[]"#,
@@ -4170,7 +4170,7 @@ fn a_rerun_without_legacy_uses_the_recorded_project_and_its_exception() {
 #[test]
 fn a_rerun_after_retire_legacy_keeps_the_rootful_exception_and_looks_at_nothing_of_the_set() {
     // The Studio after step 6 (#344): the legacy set stopped and removed by retire-legacy,
-    // the daemon still rootful without remapping until P6.
+    // the daemon still rootful without remapping (until 2026-10-13, and again on its way back).
     let rootful = INFO.replace(
         r#""SecurityOptions":["name=rootless"]"#,
         r#""SecurityOptions":[]"#,
