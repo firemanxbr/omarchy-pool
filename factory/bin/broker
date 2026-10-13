@@ -378,15 +378,15 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "omarchy-broker/1"
     protocol_version = "HTTP/1.1"
 
-    def _send(self, status, body, content_type="application/json"):
-        self.send_response(status)
+    def _send(self, status, body, content_type="application/json", reason=None):
+        self.send_response(status, reason)
         self.send_header("content-type", content_type)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _json(self, status, body):
-        self._send(status, json.dumps(body).encode())
+    def _json(self, status, body, reason=None):
+        self._send(status, json.dumps(body).encode(), reason=reason)
 
     def _body(self):
         n = int(self.headers.get("content-length", "0") or 0)
@@ -474,15 +474,23 @@ class Handler(BaseHTTPRequestHandler):
                 SPENT.add(agent.USAGE["tokens"])
                 return self._json(502, {"type": "error", "error": {"type": "api_error", "message": str(e)[:1000]}})
             except urllib.error.HTTPError as e:
-                # The provider's refusal (a key it does not take, a request it will not serve) is an answer
-                # with its own status, not a connection dropped without one, so the task's log says why.
-                # Its body stays here: a provider may quote part of the key it refused.
+                # The provider's refusal (a key it does not take, a request it will not serve) is an answer,
+                # not a connection dropped without one, so the task's log says why. Its body stays here: a
+                # provider may quote part of the key it refused. A refusal agent.complete waits out (a 429, a
+                # 5xx: agent.RETRIED) it has already waited out above; answered with its own status, the client
+                # behind would wait it out again, each of its rounds another whole cycle here and another call
+                # of the task's cap. So that one is a 424 (what the request depended on failed), which no
+                # client retries, its reason naming the provider's status for the task's log.
                 SPENT.add(agent.USAGE["tokens"])
-                code = e.code if 400 <= e.code < 600 else 502
-                return self._json(code, {"type": "error", "error": {"type": "api_error", "message": f"the provider answered HTTP {e.code}"}})
+                if 400 <= e.code < 600 and e.code not in agent.RETRIED:
+                    return self._json(e.code, {"type": "error", "error": {"type": "api_error", "message": f"the provider answered HTTP {e.code}"}})
+                said = f"the provider answered HTTP {e.code}" + (" after the broker's retries" if e.code in agent.RETRIED else "")
+                return self._json(424, {"type": "error", "error": {"type": "api_error", "message": said}}, reason=said)
             except (urllib.error.URLError, OSError, ValueError) as e:
+                # No answer from the provider (out of reach, timed out, not JSON): at once, and not retried behind.
                 SPENT.add(agent.USAGE["tokens"])
-                return self._json(502, {"type": "error", "error": {"type": "api_error", "message": f"the provider: {type(e).__name__}: {str(e)[:500]}"}})
+                return self._json(424, {"type": "error", "error": {"type": "api_error", "message": f"the provider: {type(e).__name__}: {str(e)[:500]}"}},
+                                  reason=f"no answer from the provider ({type(e).__name__})")
             # What the provider counted; about four characters a token when it said nothing.
             SPENT.add(agent.USAGE["tokens"] or (len(system) + len(user) + len(text or "")) // 4)
         # `agent` is not the API's: it says who really answered, for the probe behind this broker.

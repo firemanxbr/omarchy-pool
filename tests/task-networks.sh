@@ -195,8 +195,11 @@ cat > "$tmp/checkout/factory/worker/omarchy-build-worker.sh" <<'STUB'
 # The probe task: once the test has written its targets, what this container can and cannot reach.
 set -uo pipefail
 source /task/in/meta.sh
-# An audit is the real script's, as a release runs it (step 5).
-[[ "${kind:-}" != audit ]] || exec bash /pool/factory/worker/omarchy-build-worker.real.sh --task
+# An audit is the real script's, as a release runs it (step 5), once the test has read this container's environment.
+if [[ "${kind:-}" == audit ]]; then
+  for _ in $(seq 120); do [[ -f /task/in/inspected ]] && break; sleep 1; done
+  exec bash /pool/factory/worker/omarchy-build-worker.real.sh --task
+fi
 exec > /task/log/task.log 2>&1
 for _ in $(seq 120); do [[ -f /task/in/targets ]] && break; sleep 1; done
 source /task/in/targets
@@ -512,14 +515,20 @@ printf 'pkgname = probe-audit\npkgver = 1.0-1\narch = any\nlicense = MIT\n' > "$
 give 5 probe-audit "staging:40" audit project '{"task":40,"name":"probe-audit"}'
 E="$(name 5)"
 reported() { jq -c 'select(.path == "/api/v1/factory/tasks/5/fail" or .path == "/api/v1/factory/tasks/5/complete")' "$tmp/requests.jsonl" | tail -n1; }
-audit_started() { running "$E-agent" || [[ -n "$(reported)" ]]; }
+audit_started() { running "$E" || [[ -n "$(reported)" ]]; }
 audit_reported() { [[ -n "$(reported)" ]]; }
-until_ 120 "the audit runs with its agent sidecar" audit_started
+# The stub holds the audit until the test has read its container (in/inspected), so this is never skipped.
+until_ 120 "the audit's container runs" audit_started
+running "$E" || fail "the audit reported before its container could be read: $(reported)"
+running "$E-agent" || fail "the audit runs without its agent sidecar"
 # Its key the placeholder alone, as a draft's (step 1): the real one is its agent sidecar's.
-if running "$E"; then
-  "$RT" inspect "$E" | jq -e --arg p "$placeholder" '[.[0].Config.Env[] | select(startswith("ANTHROPIC_API_KEY="))] == [$p]' > /dev/null \
-    || fail "the audit's key is not the placeholder alone: $("$RT" inspect "$E" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
-fi
+cenv="$("$RT" inspect "$E" | jq -c --arg p "$placeholder" '[.[0].Config.Env[] | select(. != $p)]')"
+for secret in "$token" omw_ omj. sk-ant- OMARCHY_WORKER_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
+  [[ "$cenv" != *"$secret"* ]] || fail "the audit's environment holds $secret: $cenv"
+done
+"$RT" inspect "$E" | jq -e --arg p "$placeholder" '[.[0].Config.Env[] | select(startswith("ANTHROPIC_API_KEY="))] == [$p]' > /dev/null \
+  || fail "the audit's key is not the placeholder alone: $("$RT" inspect "$E" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
+touch "$tmp/work/tasks/5-$(gen 5)/in/inspected"
 until_ 300 "the audit reported" audit_reported
 said="$(reported)"
 # The sidecar's key is one the provider refuses (step 2): the audit fails, and how it fails says where it got. Before

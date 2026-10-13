@@ -290,10 +290,10 @@ secret). Everything travels in the `Authorization` header over TLS only.
   read-only and its caps (calls, tokens, wall time). The task container
   holds only the sidecar's address and a placeholder for the key
   (`via-agent-sidecar`), which the build script keeps from every child
-  (`hold_secrets`) and lends to its two model tools alone, the drafter and
-  the auditor (`with_secrets`; the auditor was not until #319, and every
-  audit on a host stopped before its first call). The file stays 0600 and
-  the agent user's, and the sidecar keeps every capability dropped and no new
+  (`hold_secrets`) and lends only to its model calls: the agent probe, the
+  drafter and the auditor (`with_secrets`; the auditor was not until #319,
+  and every audit on a host stopped before its first call). The file stays
+  0600 and the agent user's, and the sidecar keeps every capability dropped and no new
   privileges, so it runs as that owner as the engine shows it (#399): the
   agent's uid on a rootful engine, root on a rootless one (whose root is the
   agent's user), and never outside the engine's user namespace: an escape
