@@ -1007,7 +1007,7 @@ fn the_agent_sidecars_run_as_the_keys_owner_as_each_engine_shows_it() {
     let me = 1000;
     let of = |owner, engine, remap| KeysUser::of(owner, engine, remap, me);
     let user = |uid, gid| Some(KeysUser::Owner { uid, gid });
-    // A rootful daemon without remapping (the Studio): the owner's own ids.
+    // A rootful daemon without remapping (the Studio until 2026-10-13): the owner's own ids.
     assert_eq!(of((1000, 1000), Engine::Rootful, false), user(1000, 1000));
     // A Mac's VM (rootful in it, no remapping): the Mac's ids, which its shared directory shows.
     assert_eq!(of((501, 20), Engine::Rootful, false), user(501, 20));

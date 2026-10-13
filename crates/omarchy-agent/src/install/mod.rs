@@ -779,7 +779,8 @@ pub(crate) fn measure_as(
     // install again repairs it without the flag (legacy.json's owner is checked below).
     // A project retire-legacy removed (#344) is no legacy set any more: nothing of it is
     // looked at again. The rootful exception it was recorded with stays until P6 (design v2
-    // §19.3, §21.1): the Studio stays rootful after step 6, and install again repairs it.
+    // §19.3, §21.1): the Studio stayed rootful after step 6 until its move to subuid on
+    // 2026-10-13 (#407), and that move's way back installs again on the rootful daemon.
     let recorded = std::fs::read(p.data.join(legacy::FILE))
         .ok()
         .and_then(|b| serde_json::from_slice::<legacy::Legacy>(&b).ok());

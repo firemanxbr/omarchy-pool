@@ -244,9 +244,12 @@ describe("the host page's read (#324, design v2 §18.1)", () => {
     // Applied, target and floor; the rollout's state; the last round.
     expect(h).toMatchObject({ release_applied: "v1.20.0", release_target: "v1.20.0", release_floor: "v1.18.0", rollout: { state: "idle", since: "2026-10-06T08:00:00Z", target: null } });
     expect(h.round).toMatchObject({ outcome: "ok", from: "v1.19.2", step: "guard" });
-    // The box: the hosting requirement its isolation level does not meet as a new host would (the Studio's recorded exception).
+    // The box: the hosting requirement its isolation level does not meet as a new host would (root, beside its legacy set). It
+    // says what holds for any host at root, naming no host's exception.
     expect(h.needs_person.map((n: { what: string }) => n.what)).toEqual(["hosting"]);
-    expect(h.needs_person[0].text).toContain("the Studio's recorded exception until P6");
+    expect(h.needs_person[0].text).toContain("refused for a new host, a recorded exception beside a legacy set only");
+    expect(h.needs_person[0].text).toContain("--remap-existing-daemon on one in use");
+    expect(h.needs_person[0].text).not.toContain("the Studio's recorded exception");
     // The recorded legacy project and its state.
     expect(h.legacy).toMatchObject({ project: "omarchy-pool", state: "running", running: 3 });
     // Its leases: kind, package, arch, lane, units, since when, and a Stop its owner may press.
@@ -575,7 +578,7 @@ describe("the isolation its agent reports (#407)", () => {
     let v = await views();
     expect(v.row).toEqual({ isolation: "root", dedicated: 1 });
     expect(v.box).toEqual(["hosting"]);
-    expect(v.page.needs_person[0].text).toContain("the Studio's recorded exception until P6");
+    expect(v.page.needs_person[0].text).toContain("refused for a new host, a recorded exception beside a legacy set only");
     // The level it enrolled with: nothing changed, nothing in the journal.
     expect(await journal()).toEqual([]);
 

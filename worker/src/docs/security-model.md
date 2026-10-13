@@ -145,9 +145,9 @@ below `subuid` to dedicated machines and VMs:
 | Host | The agent process | A task-container escape lands as | Level | Allowed |
 |---|---|---|---|---|
 | Linux, rootless podman, task containers `--userns=auto` | its user | an unprivileged subuid that owns nothing and cannot reach the socket | `subuid` | anywhere, with a dedicated `omarchy` user |
-| Linux, rootful docker with `userns-remap` | its user, in the docker group | an unprivileged remapped uid, no socket | `subuid` | dedicated machines and VMs |
+| Linux, rootful docker with `userns-remap` (the Studio, since 2026-10-13) | its user, in the docker group | an unprivileged remapped uid, no socket | `subuid` | dedicated machines and VMs |
 | Linux, rootless docker (one user) | its user | the runtime's user: the daemon, the dispatcher's tokens, the sidecars' keys | `user` | dedicated machines and VMs |
-| Linux, rootful docker without remapping (the Studio until P6) | its user, in the docker group | **root** on the host | `root` | dedicated machines, a recorded exception, until P6 |
+| Linux, rootful docker without remapping (the Studio until 2026-10-13) | its user, in the docker group | **root** on the host | `root` | never for a new host: a recorded exception, on a dedicated machine beside a legacy set only |
 | macOS, the agent's `omarchy` Colima VM | its user | the VM, with only the work root, the secrets directory and the set directory mounted | `vm` | yes: the VM is dedicated |
 | macOS, Docker Desktop or OrbStack (used if present, never installed) | its user | the shared user VM, which mounts the home directory by default | `vm-shared` | only with the home mount removed |
 

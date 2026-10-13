@@ -2888,7 +2888,7 @@ mod tests {
         let (tdir, rel, work) = dirs();
         let user = |user: &str| AgentUser::parse(user).unwrap();
         for (engine, u, args) in [
-            // A rootful daemon (the Studio): the agent's own uid, as the host has it.
+            // A rootful daemon without remapping (the Studio until 2026-10-13): the agent's own uid, as the host has it.
             (
                 "rootful docker",
                 user("1000:1000"),

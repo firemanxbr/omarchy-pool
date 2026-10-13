@@ -83,7 +83,7 @@ describe("the pages describe the maintainers' hosts, never the legacy role conta
       "The dispatcher never holds an agent key or a", "No agent process serves more than one task", "The host key never enters a container",
       "A task container reaches only public addresses", "A contributor&#39;s task never mounts a project cache",
       // The levels.
-      "<code>subuid</code>", "<code>user</code>", "<code>root</code>", "<code>vm</code>", "<code>vm-shared</code>", "a recorded exception, until P6",
+      "<code>subuid</code>", "<code>user</code>", "<code>root</code>", "<code>vm</code>", "<code>vm-shared</code>", "never for a new host: a recorded exception", "(the Studio, since 2026-10-13)",
     ]) expect(t.replace(/'/g, "&#39;"), s).toContain(s);
   });
 

@@ -575,8 +575,8 @@ container runs (refused otherwise, exit 3, nothing changed): it keeps the
 which the remapped daemon never looks at, and checks that `docker info`
 lists `name=userns` after the restart (#407). The Studio ran it once, at
 its canary visit, and left `userns-remap` off there — its recorded
-exception until P6 (D13; *The Studio host*, below) — until the root
-session of *The Studio at subuid* (below) turns it on with that flag. A Mac runs
+exception (D13; *The Studio host*, below) — until the root session of
+*The Studio at subuid* (below) turned it on with that flag on 2026-10-13. A Mac runs
 [`factory/host/prep-mac.sh`](../factory/host/prep-mac.sh) instead, with no
 sudo (*Installing a Mac*, below).
 
@@ -806,7 +806,7 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--work-root <dir>`, `--secrets-dir <dir>` | where tasks work (default `<data>/work`) and where `agent.env` goes (default `<data>/secrets`); the secrets directory must be outside the work root and the set directory |
 | `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
 | `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
-| `--legacy <compose project>` | a set from before hosts running beside the new bundle, as the Studio's was at its switch (#345): recorded in `legacy.json`, nothing in it changed, until its owner retires it with *Retire legacy set*; a rootful daemon without userns-remap was the Studio's recorded exception until P6; a re-run without the flag uses the recorded project. Every such set has retired (#346): a new host has none |
+| `--legacy <compose project>` | a set from before hosts running beside the new bundle, as the Studio's was at its switch (#345): recorded in `legacy.json`, nothing in it changed, until its owner retires it with *Retire legacy set*; a rootful daemon without userns-remap was the Studio's recorded exception until its move to `subuid` on 2026-10-13 (*The Studio at subuid*); a re-run without the flag uses the recorded project. Every such set has retired (#346): a new host has none |
 | `--agent-env-from <file>` | copies the agent keys from an existing file after showing which keys it holds; its `GITHUB_TOKEN` must be a classic token with no scope, or absent, so a file whose token is fine-grained cannot be given as is; without it, an `agent.env` already in the secrets directory is kept; otherwise the keys are asked for on `/dev/tty`, not shown (with `--yes`, none: the host builds only, `OMARCHY_AGENT_HELD=no-keys` (#419), on a remapped daemon too, whose keys given later are written with their ACL, #405); an empty directory found at `agent.env` is removed first, and said, and a directory with something in it refused |
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
@@ -1042,11 +1042,11 @@ and `agent.toml`'s engine and writes into `etc/dispatcher.env`:
 
 | Engine | `OMARCHY_AGENT_USER` | Why |
 |---|---|---|
-| rootful docker without remapping (the Studio) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
+| rootful docker without remapping (the Studio until 2026-10-13) | the agent's `uid:gid` (a file of group `root`: gid 65534) | uids are the host's; a sidecar that is not root takes no root group |
 | rootless podman or docker (and Quadlet) | `0:0` | the engine's root is the agent's user; its own uid would map to a subordinate one |
-| rootful docker with userns-remap | none: `OMARCHY_AGENT_REMAPPED_USER=65533:65533` (#405) | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so they run as one remapped uid of their own, which the file's ACL lets read it (*A remapped host's keys*, below), named in a variable of its own; with no such uid, or no such ACL on the file, `OMARCHY_AGENT_HELD=userns-remap` or `keys-acl` instead, and with no keys file `no-keys` |
+| rootful docker with userns-remap (the Studio since 2026-10-13) | none: `OMARCHY_AGENT_REMAPPED_USER=65533:65533` (#405) | no remapped uid is the owner, and the sidecars stay remapped as task containers do (design v2 §19.1), so they run as one remapped uid of their own, which the file's ACL lets read it (*A remapped host's keys*, below), named in a variable of its own; with no such uid, or no such ACL on the file, `OMARCHY_AGENT_HELD=userns-remap` or `keys-acl` instead, and with no keys file `no-keys` |
 | any other engine, with no keys file (no `agent.env`, or not a regular file: install without keys) | none: `OMARCHY_AGENT_HELD=no-keys` (#419) | no probe and no agent sidecar runs, so no mount names a file that is not there; the host builds only, and its page says `no agent keys: builds only` |
-| a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM; the `omarchy` profile's virtiofs mount shows the Mac's uid and checks access against it, as on the Studio. Docker Desktop and OrbStack show shared files their own way, and the Mac's uid reads the file there too |
+| a Mac's VM (the `omarchy` Colima profile; Docker Desktop's or `OrbStack`'s) | the Mac user's `uid:gid` | rootful in the VM; the `omarchy` profile's virtiofs mount shows the Mac's uid and checks access against it, as a rootful daemon without remapping does. Docker Desktop and OrbStack show shared files their own way, and the Mac's uid reads the file there too |
 
 No sidecar ever leaves the engine's user namespace (`--userns` is refused
 on every container the dispatcher starts), so an escape from one lands no
@@ -2836,7 +2836,9 @@ maintainer list's stop, below the minimum, the disk under the floor, a lane
 held for binfmt, limits the runtime does not enforce (a rootless runtime
 needs systemd to delegate cpu, memory and pids to the agent's user), the
 hosting requirement its isolation level does not meet as a new host would
-(`root` is the Studio's recorded exception until P6; the level is the one
+(`root` never meets it: refused for a new host, it is a recorded exception
+beside a legacy set only, as the Studio's was until its move to `subuid` on
+2026-10-13; the level is the one
 its agent's last report says, from `run/capacity.json`, which the running
 agent does not count again: after the daemon moves to userns-remap, the
 install run again, or `omarchy-agent capacity --write` at the host,
@@ -2883,7 +2885,7 @@ its password, so a root step there is the maintainer's to type.
 | the agent | its owner's login on the Studio — in the docker group, linger on — as a `systemd --user` unit (*Installing a host*, above), its data in `~/.local/share/omarchy-agent` (`agent.toml`, the bundles) |
 | the host key | `host.ed25519` in the agent's `state/`, a file: the Studio has no TPM (#330, *Where the host key lives*, above) |
 | the work root | `/srv/omarchy-host`, a btrfs subvolume of its own on the internal disk, beside the directory its legacy set ran from (below) |
-| the secrets directory | `/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0600), outside the work root and beside the directory its legacy set ran from |
+| the secrets directory | `/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0640, its owner's and readable by the agent sidecars' remapped uid 231069 through its ACL alone, #405), outside the work root and beside the directory its legacy set ran from |
 | the task subnets | `10.232.0.0/16`, dropped to the host by prep-root.sh's task firewall |
 | the bundle | the agent's set directory, `~/.local/share/omarchy-agent/sets/host/`, on the compose driver (Quadlet is rootless podman's); the host worker token in its own file there, `run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327) |
 
@@ -2909,23 +2911,22 @@ verdict (#414, *Pool jobs on hosts*, above); every health row names the
 worker that posted it (`payload.posted_by`), so a red of this host's says
 so.
 
-**Isolation `root`, a recorded exception until P6** (design v2 §19.1, §19.3,
-D13): rootful docker (29.9.0, with the containerd image store) without
-`userns-remap`. Turning remapping on moves the daemon to a data root of its
-own, which would have stranded the legacy set while it was the switch's way
-back; that set is retired (*Its legacy set, retired*, below), so nothing
-keeps the exception for a way back any more, and the move to `subuid` is
-the Studio's next step. It is a dedicated build machine, so a
-task-container escape lands as root on a machine that holds nothing of a
-person's; its page shows the level, `root (dedicated)`, and the exception,
-a *hosting* item. P6 moves it to `subuid` in one root session, *The Studio
-at subuid* (below, #407): `userns-remap` on its existing daemon, after
-which the page says `subuid (dedicated)` and no *hosting* item; rootless
-podman with `--userns=auto` is later hardening (#430). Until then its agent
-sidecars run as the agent's uid, the owner of `agent.env`, with every
-capability dropped (`OMARCHY_AGENT_USER`, *How an agent sidecar reads the
-keys*, above); remapped, as 65533 inside, which `agent.env`'s ACL lets read
-the keys (*A remapped host's keys*, above).
+**Isolation `subuid`, since 2026-10-13** (design v2 §19.1, §19.3, #407):
+rootful docker 29.9.0 with `userns-remap`. A task container's root is host
+uid 165536, the first of `dockremap`'s subordinate ids (165536–231071), so
+a task-container escape lands in an unprivileged subuid that owns nothing;
+its page shows the level, `subuid (dedicated)`, and no *hosting* item. The
+daemon keeps its images in overlay2 on a data root of its own,
+`/var/lib/docker/165536.165536` (dockerd turns the containerd image store
+off under userns-remap). Until that day it ran without remapping, isolation
+`root`: the recorded exception (D13) its legacy set held it at while that
+set was the switch's way back, as turning remapping on moves the daemon to
+a new data root and would have stranded it. With that set retired (*Its
+legacy set, retired*, below), P6's one root session moved it, *The Studio
+at subuid* (below), which says what was observed; rootless podman with
+`--userns=auto` is later hardening (#430). Its agent sidecars run as 65533
+inside, host uid 231069, with every capability dropped, and `agent.env`'s
+ACL lets that uid read the keys (*A remapped host's keys*, above).
 
 **The 4K VM, `studio-vm4k`** (#413), is a host of its own under the same
 owner, on the same machine: a Debian 13 arm64 VM with its own 4K-page
@@ -3109,19 +3110,51 @@ waits for a native host or another lane on 4K pages, as before the VM.
 
 ### The Studio at subuid
 
-Until this move the Studio's rootful docker runs without userns-remap, so a
-task container's root is the host's root: the recorded exception until P6
-(D13; *The Studio host*, above). The legacy set, on the same daemon, held
-it there while it was the switch's way back; that set is retired — its
+The Studio moved to `subuid` on 2026-10-13, in the root session below.
+Until then its rootful docker ran without userns-remap, so a task
+container's root was the host's root: the recorded exception (D13; *The
+Studio host*, above). The legacy set, on the same daemon, held it there
+while it was the switch's way back; that set retired — its
 `retire-legacy` order done on 2026-10-13 at 12:36 UTC and its six
 registrations revoked (*Its legacy set, retired*, below) — and #404 took
-the legacy path out of the repository, so the move to `subuid` is the
+the legacy path out of the repository, so the move to `subuid` was the
 Studio's next step, P6's one root session (#407; a maintainer decision of
 2026-10-12, route (a)): userns-remap on its existing daemon, with the host
 drained meanwhile, then a way back of one day. Rootless podman with
 `--userns=auto`, route (b), is later hardening (#430). Its x86_64 lane
 stays on 16K pages: a build it sends back `needs_native` to studio-vm4k
-(*The Studio's x86_64 VM*, above) is that lane working, as before.
+(*The Studio's x86_64 VM*, above) is that lane working, as before. The
+procedure below is the one the Studio ran, and stays the way to move
+another host whose rootful daemon already holds images or containers: its
+names (studio-m2, its id, its registration, its paths and task subnets)
+are the Studio's, to read as that host's own.
+
+**What was observed** on 2026-10-13 (UTC):
+
+- 15:01:12, studio-m2 (host `h_2t7pul95fs`) drained, the root session ran
+  `prep-root.sh --remap-existing-daemon` from v1.1.6's tree: docker 29.9.0
+  remaps users (`docker info` lists `name=userns`), its data root
+  `/var/lib/docker/165536.165536`, storage driver overlay2 (dockerd turned
+  the containerd snapshotter off under userns-remap), `dockremap`'s
+  subordinate ids 165536–231071. The old data root, `/var/lib/docker`,
+  stays untouched, and `/etc/docker/daemon.json.pre-remap` with it: the
+  way back of one day.
+- The agent's install again (v1.1.6, agent 0.5.3, `--agent-env-from`,
+  `--yes`) wrote the envelope's `userns_remap = true`, `agent.env` 0640
+  with the ACL `user::rw- user:231069:r-- group::--- mask::r-- other::---`,
+  and `etc/dispatcher.env` with `OMARCHY_AGENT_REMAPPED_USER=65533:65533`
+  alone; `run/capacity.json` says `subuid`. The dispatcher logged both of
+  its lines (step 6, below): a task's root is host uid 165536, the agent
+  sidecars and the probe run as 65533:65533, host uid 231069.
+- 15:08, the registration resumed; the pool's `hosts` row and
+  `/api/v1/hosts/fleet` say isolation `subuid` (#431).
+- On the remapped daemon, build 1639 (omarchy-cli, aarch64 native) staged
+  from 15:12 to 15:16, and audit 1640 ran on studio-m2 from 15:16 to 15:17,
+  its agent sidecar reading the keys through the ACL.
+
+The way back within the day stays below as it was written, and the old
+data root is reclaimed afterwards, through the old daemon itself (the
+last part of this section).
 
 **What the remapping changes.** The daemon (docker 29.9.0 with the
 containerd image store, on btrfs) starts empty on a data root of its own,
@@ -3460,8 +3493,9 @@ docker image ls ghcr.io/firemanxbr/omarchy-worker                   # images no 
 ```
 
 Its volumes and images are on the daemon's data root of before the
-remapping: once *The Studio at subuid* (above) has run, only the old daemon
-sees them, and that section's reclaim removes them with the rest.
+remapping: since *The Studio at subuid* (above) ran, on 2026-10-13, only
+the old daemon sees them, and that section's reclaim removes them with the
+rest.
 
 Nothing of the host is in that directory: its work root (`/srv/omarchy-host`)
 and its secrets (`/srv/omarchy-host-secrets`) were put beside it at the
@@ -4225,12 +4259,17 @@ show. The header of every page says so. To lift it by hand:
   and search, ten minutes for a package page, half an hour for security), so
   viewers do not multiply the load; the pages poll every 60–120 s and retry
   transient errors.
-* **The Studio's isolation is `root` until P6.** Its rootful daemon runs
-  without `userns-remap` (D13): an escape from a task container lands as
-  root on that dedicated machine. Until P6 moves it to `subuid` (*The
-  Studio at subuid*, its next step), the contributors' code that runs there is what its page shows, and a sandboxed
-  runtime on it (*A sandboxed runtime for community tasks*) narrows the
-  escape for what a contributor wrote.
+* **The Studio is `subuid` on a rootful daemon.** Since 2026-10-13 its
+  docker remaps users (*The Studio at subuid*, #407): an escape from a task
+  container lands in an unprivileged subuid, no longer as root. The daemon
+  itself stays rootful, so whoever holds its socket — the dispatcher, the
+  agent — is root-equivalent there; rootless podman with `--userns=auto` is
+  later hardening (#430). Its retired legacy record still carries the
+  rootful exception (D13), which lets the way back's install run on the
+  old daemon without remapping, `root` again, until P6 takes that
+  exception out of the agent. A sandboxed runtime on it (*A sandboxed
+  runtime for community tasks*) narrows the escape further for what a
+  contributor wrote.
 
 ## Kill switch
 
