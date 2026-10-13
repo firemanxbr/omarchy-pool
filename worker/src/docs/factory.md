@@ -603,7 +603,9 @@ jobs       a pool job (#340): one at a time, in a child process of its own (pkg-
            helper <network>-helper on the job's own internal network beside its egress sidecar, made as a task's
            and never a sizing exception's bridge, whatever OMARCHY_DIRECT_NETWORK grants (health, promote,
            security and enqueue — its PKGBUILD reader, on the host's native arch — get a /28), anything else
-           refused (125); the job holds the unit kept for pool jobs, never a task's (a build starts beside it)
+           refused (125); on a remapped daemon the scratch dir opened to the task root before the helper starts
+           (for reading at /repo:ro, given to it at /repo, #407); the job holds the unit kept for pool jobs,
+           never a task's (a build starts beside it)
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
 out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
            resources.json, verdict.json), uploaded by the dispatcher with the job token — a build's completion

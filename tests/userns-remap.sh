@@ -30,10 +30,20 @@
 #      keys and the uid it ran as — reads them, so a claim's `agent` is `ok`; a draft runs
 #      with its agent sidecar remapped as 65533:65533 (B+65533 on the host), which reads the
 #      keys and writes its usage into a directory given to that uid, and completes; agent.env
-#      is mounted by the probe and the agent sidecar alone. Then the ACL lost to a
-#      `chmod 600` holds the host (`OMARCHY_AGENT_HELD=keys-acl`), and no keys file holds it
-#      too (`no-keys`, #419);
-#   4. nothing else moves: the dispatcher's real-engine tests on this engine (a task
+#      is mounted by the probe and the agent sidecar alone;
+#   4. a pool job's helpers (#407): a health check as a pool job runs it, whose stub script
+#      makes its scratch directories as the real scripts do (`mktemp -d`: 0700, the
+#      dispatcher's root; its files owner-only under umask 077) and starts its helpers
+#      through omarchy-task-run, the job's RUNTIME — a check with its directory read-only
+#      at /repo, as tests/health-check.sh does, and an export into a directory of its own
+#      read-write, as tests/abi-gate.sh's reference does: both run remapped (root B) and
+#      pass, the check's directory opened for reading (0755, its files a+r, still the
+#      dispatcher's), the export's given to B (still 0700) and what it wrote B's, which the
+#      job reads back and removes as the real script does; the job completes healthy and
+#      its helpers, sidecar and network are gone;
+#   5. the ACL lost to a `chmod 600` holds the host (`OMARCHY_AGENT_HELD=keys-acl`), and no
+#      keys file holds it too (`no-keys`, #419);
+#   6. nothing else moves: the dispatcher's real-engine tests on this engine (a task
 #      network with no gateway; the probe's keys test takes its remapped branch, which this
 #      script's agent test and step 3 cover).
 #
@@ -298,6 +308,10 @@ give() { # id name ref — one task for the next claim
   jq -cn --argjson id "$1" --arg n "$2" --arg r "$3" --arg a "$native" --arg g "$(gen "$1")" \
     '{task:{id:$id,kind:"build",name:$n,arch:$a,lane:"native",trust:"community",pkgbuild_ref:$r,params:{},attempts:1,max_attempts:3,publish:1,lease_gen:$g,units:1,disk_gb:0,release:"v9.9.9"},token:("omj.secret-of-" + ($id|tostring)),lease_minutes:30}' >> "$tmp/tasks.jsonl"
 }
+give_health() { # id ring — a pool job for the next claim: the health check of this machine's ring arch (#340, #407)
+  jq -cn --argjson id "$1" --arg r "$2" --arg a "$native" --arg g "$(gen "$1")" \
+    '{task:{id:$id,kind:"health",name:"health",arch:$a,trust:"project",pkgbuild_ref:"-",params:{ring:$r,arch:$a},attempts:1,max_attempts:3,publish:1,lease_gen:$g,units:1,disk_gb:0,release:"v9.9.9"},token:("omj.secret-of-" + ($id|tostring)),lease_minutes:30}' >> "$tmp/tasks.jsonl"
+}
 until_() { local n="$1" what="$2"; shift 2; for _ in $(seq "$n"); do "$@" && return 0; sleep 1; done; fail "after ${n}s: $what"; }
 report() { jq -c --arg p "/api/v1/factory/tasks/$1/$2" 'select(.path == $p) | .body' "$tmp/requests.jsonl" | tail -n1; }
 reported() { [[ -n "$(report "$1" "$2")" ]]; }
@@ -427,6 +441,90 @@ else
       || fail "made, and not by a task, a probe or the start: $c ($made)"
   done
 fi
+
+# ---------- 4. a pool job's helpers through omarchy-task-run (#407) ----------
+# The release's health check as a pool job runs it, a stub in the real scripts' shape: its scratch directories made with
+# mktemp -d (0700, the dispatcher's root) and, under umask 077, its files owner-only; a check through $RUNTIME (the job's
+# omarchy-task-run) with its directory read-only at /repo, as tests/health-check.sh starts it, then an export into a directory
+# of its own mounted read-write, as tests/abi-gate.sh's reference starts it, whose tar the script reads back and removes. Each
+# helper's root is B, "other" on what the job made until the shim opens it to B; the job passes only if both ran.
+mkdir -p "$tmp/checkout/tests"
+cp "$root/tests/images.env" "$tmp/checkout/tests/images.env"
+cat > "$tmp/checkout/tests/fetch-keyrings.sh" <<'STUB'
+#!/usr/bin/env bash
+for k in archlinux omarchy omarchy-asahi asahi-alarm; do echo "key of $k" > "$1/$k.gpg"; done
+STUB
+cat > "$tmp/checkout/tests/health-check.sh" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+RING="$1"; ARCH="${2:-x86_64}"
+source "$(cd "$(dirname "$0")" && pwd)/images.env"
+case "$ARCH" in
+  x86_64)  IMAGE="$ARCHLINUX_BASE"; PLATFORM=linux/amd64; KEYRING=archlinux ;;
+  aarch64) IMAGE="$ARCHLINUXARM_BASE"; PLATFORM=linux/arm64; KEYRING=archlinuxarm ;;
+esac
+RUNTIME="${RUNTIME:-$(command -v docker || command -v podman)}"
+out="$OMARCHY_WORK_DIR/health-$RING.out"
+umask 077
+WORK="$(mktemp -d)"; REF="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$REF"' EXIT
+mkdir "$WORK/keyrings"
+cp "$OMARCHY_KEYRINGS"/*.gpg "$WORK/keyrings/"
+printf '[options]\nArchitecture = %s\n' "$ARCH" > "$WORK/pacman.conf"
+cat > "$WORK/check.sh" <<'CHECK'
+set -euo pipefail
+echo "uid_map: $(awk 'NR == 1 { print $1, $2, $3 }' /proc/self/uid_map)"
+grep -q '^Architecture = ' /repo/pacman.conf
+echo "keyrings: $(cat /repo/keyrings/*.gpg | wc -l)"
+echo "repo: $(touch /repo/x 2>&1 || true)"
+echo "TOTAL=3"
+CHECK
+"$RUNTIME" run --rm --platform "$PLATFORM" -e KEYRING="$KEYRING" -v "$WORK:/repo:ro" "$IMAGE" bash /repo/check.sh > "$out" 2>&1
+code=$?
+echo "== check: $code" >> "$out"
+echo "== work: $(stat -c '%u:%g %a' "$WORK" "$WORK/check.sh" | tr '\n' ' ')" >> "$out"
+cat > "$REF/export.sh" <<'EXPORT'
+set -euo pipefail
+cd /
+tar -cf /repo/rootfs.tar var/lib/pacman/local
+EXPORT
+"$RUNTIME" run --rm --platform "$PLATFORM" -v "$REF:/repo" "$IMAGE" bash /repo/export.sh >> "$out" 2>&1
+exported=$?
+echo "== export: $exported" >> "$out"
+echo "== ref: $(stat -c '%u:%g %a' "$REF" "$REF/export.sh" "$REF/rootfs.tar" 2>&1 | tr '\n' ' ')" >> "$out"
+packages=$(tar -tf "$REF/rootfs.tar" 2>/dev/null | grep -c '/desc$')
+echo "== read back: $packages" >> "$out"
+rm -rf "$WORK" "$REF"
+echo "== removed: $?" >> "$out"
+[[ $code -eq 0 && $exported -eq 0 && $packages -gt 0 ]] && grep -q '^TOTAL=3$' "$out"
+STUB
+chmod +x "$tmp/checkout/tests/health-check.sh" "$tmp/checkout/tests/fetch-keyrings.sh"
+give_health 3 remap
+helper_out="$tmp/work/jobs/health-remap.out"
+job_said() { as_root cat "$helper_out" 2>/dev/null; }
+job_ended() { reported 3 complete || reported 3 fail; }
+until_ 300 "task 3 (a pool job's health check) ended" job_ended
+reported 3 fail && fail "a pool job's helpers on the remapped daemon: $(report 3 fail); its check said: $(job_said)"
+said_job="$(job_said)"
+jq -e --arg s "remap/$native healthy" '.summary == $s' <<<"$(report 3 complete)" >/dev/null || fail "task 3's report: $(report 3 complete)"
+# The check: remapped, its directory read-only and readable to B, every file of it read.
+grep -q "^uid_map: 0 $B " <<<"$said_job" || fail "the check did not run as the remapped root $B: $said_job"
+grep -qx 'TOTAL=3' <<<"$said_job" || fail "the check did not run to its end: $said_job"
+grep -qx 'keyrings: 4' <<<"$said_job" || fail "the check did not read the keyrings in its directory: $said_job"
+grep -q '^repo: .*Read-only' <<<"$said_job" || fail "the check's /repo is writable: $said_job"
+# Opened for reading (0755, check.sh 0600 made 0644), its owner the dispatcher's still.
+grep -qx '== work: 0:0 755 0:0 644 ' <<<"$said_job" || fail "the check's directory: $(grep '^== work' <<<"$said_job")"
+# The export's directory given to B with its mode kept, its script opened for reading, what the helper wrote B's; read back
+# and removed by the job as root, as the real script does.
+grep -qx "== ref: $B:$G 700 0:0 644 $B:$G [0-7]* " <<<"$said_job" || fail "the export's directory: $(grep '^== ref' <<<"$said_job")"
+grep -qx '== read back: [1-9][0-9]*' <<<"$said_job" || fail "the job did not read back what its helper wrote: $(grep '^== read back' <<<"$said_job")"
+grep -qx '== removed: 0' <<<"$said_job" || fail "the job did not remove what its helper wrote: $(grep '^== removed' <<<"$said_job")"
+until_ 30 "task 3's helper, egress sidecar and network removed" net_gone "$(name 3)"
+gone "$(name 3)-helper" || fail "task 3's helper is still there"
+gone "$(name 3)-egress" || fail "task 3's egress sidecar is still there"
+echo "ok: a pool job's helpers through omarchy-task-run on the remapped daemon — a check read-only at /repo (opened 0755, its files a+r, the dispatcher's still) and an export read-write (given to $B:$G, 0700, its tar $B's, read back and removed by the job) — ran as root $B, and the health check completed"
+
+# ---------- 5. the ACL lost, and no keys (#405, #419) ----------
 as_root kill "$pid" 2>/dev/null || true
 for _ in $(seq 30); do [[ -d "/proc/$pid" ]] || break; sleep 1; done
 rm -f "$tmp/dispatcher.pid"
@@ -443,7 +541,7 @@ render
   || fail "no keys file: $(grep -E '^OMARCHY_AGENT_(HELD|USER|REMAPPED_USER)=' "$envfile" || echo none)"
 echo "ok: the ACL lost to a chmod 600 holds the model kinds (OMARCHY_AGENT_HELD=keys-acl), and so does no keys file (no-keys)"
 
-# ---------- 4. the dispatcher's real-engine tests on this engine ----------
+# ---------- 6. the dispatcher's real-engine tests on this engine ----------
 (cd "$root" && OMARCHY_STANDIN_IMAGE="$standin" cargo test -q --locked -p pkg-repo --lib -- --ignored --exact --nocapture \
   dispatch::engine::tests::real_engine_a_task_network_made_here_has_no_gateway \
   dispatch::engine::tests::real_engine_the_probe_reads_owner_only_keys_as_their_owner) \

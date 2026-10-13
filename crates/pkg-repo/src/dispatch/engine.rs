@@ -15,7 +15,7 @@
 
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::libpod;
 use super::spec::{self, EGRESS_NETWORK, GEN_LABEL, HOST_LABEL};
@@ -299,8 +299,10 @@ pub fn gateway_of(json: &str) -> Result<spec::Gateway, String> {
 /// A task container's root as the host sees it on a remapped daemon (#405, design v2 §19.1):
 /// the first uid and gid of the daemon's remapped range (`dockremap`'s in `/etc/subuid` and
 /// `/etc/subgid`). What the dispatcher makes for a task to write is given to it
-/// ([`super::kinds::give_writable`], [`super::cache::ready`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ([`super::kinds::give_writable`], [`super::cache::ready`]), and a pool job's helper, whose root
+/// it is too, has its directory opened to it by the shim ([`super::shim::open_for`], #407), which
+/// reads it in the job's context (`helper.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRoot {
     pub uid: u32,
     pub gid: u32,

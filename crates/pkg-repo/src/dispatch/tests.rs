@@ -5730,6 +5730,50 @@ fn a_health_check_gets_the_shims_context_on_a_lane_of_its_ring_and_one_without_s
     assert!(h.leases().is_empty());
 }
 
+/// #407: a pool job's helpers on a remapped daemon run as its task root too, so the dispatcher
+/// names that root in the job's context (`helper.json`), which the shim opens a helper's
+/// directory to before the helper starts (`shim::open_for`); a host without remapping names
+/// none, and its context is as it was.
+#[test]
+fn a_remapped_hosts_pool_job_tells_the_shim_its_task_root_and_a_plain_hosts_none() {
+    let root = TaskRoot {
+        uid: 165_536,
+        gid: 165_536,
+    };
+    for remapped in [false, true] {
+        let h = H::new();
+        let mut d = h.dispatcher();
+        if remapped {
+            d.net.task_root = Some(root);
+        }
+        let ctx = h.out("helper-50.json");
+        h.launch.set(
+            50,
+            &format!("cp \"$JOB_DIR/helper.json\" {}; {JOB_DONE}", ctx.display()),
+        );
+        h.give(job(
+            50,
+            "health",
+            "aarch64",
+            json!({ "ring": "rc", "arch": "aarch64" }),
+            GEN,
+        ));
+        h.until(&mut d, "the health check's report", |h| {
+            !h.pool.completes_of(50).is_empty()
+        });
+        let raw: Value = serde_json::from_slice(&std::fs::read(&ctx).unwrap()).unwrap();
+        let c: shim::Context = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(c.arches, ["aarch64"]);
+        if remapped {
+            assert_eq!(c.task_root, Some(root));
+            assert_eq!(raw["task_root"], json!({ "uid": 165_536, "gid": 165_536 }));
+        } else {
+            assert_eq!(c.task_root, None);
+            assert!(raw.get("task_root").is_none(), "{raw}");
+        }
+    }
+}
+
 #[test]
 fn an_enqueue_reads_its_recipes_through_the_shim_on_the_hosts_own_arch() {
     // Its PKGBUILD reader sources recipes — package code — so it is a helper through the spec

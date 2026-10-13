@@ -252,7 +252,11 @@ pub fn open_input(task_dir: &Path) -> std::io::Result<()> {
     open_readable(&task_dir.join("in"), Path::new("in"))
 }
 
-fn open_readable(path: &Path, shown: &Path) -> std::io::Result<()> {
+/// `path` opened for reading to every user as [`open_input`] does `in`: a directory 0755 and what
+/// it holds ([`open_within`]), a regular file `a+r` with its other bits kept, a link left as it is.
+/// `shown` names it in an error. A pool job's helper directory is opened so too (#407,
+/// [`super::shim::open_for`]).
+pub(super) fn open_readable(path: &Path, shown: &Path) -> std::io::Result<()> {
     use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::PermissionsExt as _;
     let said =
@@ -273,17 +277,26 @@ fn open_readable(path: &Path, shown: &Path) -> std::io::Result<()> {
     if meta.is_dir() {
         file.set_permissions(std::fs::Permissions::from_mode(0o755))
             .map_err(said)?;
-        for e in std::fs::read_dir(path).map_err(said)? {
-            let e = e.map_err(said)?;
-            let t = e.file_type().map_err(said)?;
-            if t.is_dir() || t.is_file() {
-                open_readable(&e.path(), &shown.join(e.file_name()))?;
-            }
-        }
+        open_within(path, shown)?;
     } else if meta.is_file() {
         let mode = meta.permissions().mode() & 0o7777;
         file.set_permissions(std::fs::Permissions::from_mode(mode | 0o444))
             .map_err(said)?;
+    }
+    Ok(())
+}
+
+/// What the directory `dir` holds, opened for reading ([`open_readable`]): its directories and
+/// regular files, walked without following a link; `dir` itself as it is.
+pub(super) fn open_within(dir: &Path, shown: &Path) -> std::io::Result<()> {
+    let said =
+        |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", shown.display()));
+    for e in std::fs::read_dir(dir).map_err(said)? {
+        let e = e.map_err(said)?;
+        let t = e.file_type().map_err(said)?;
+        if t.is_dir() || t.is_file() {
+            open_readable(&e.path(), &shown.join(e.file_name()))?;
+        }
     }
     Ok(())
 }
