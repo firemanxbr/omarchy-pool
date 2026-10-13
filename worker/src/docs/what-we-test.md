@@ -330,3 +330,31 @@ maintainer merges it like any other change to the process.
   one owner's hosts as one machine, since
   the VM enrolls as a host of its own on the Studio and an audit there would
   have counted as one made elsewhere.
+- **2026-10-13 — a Rust workspace, makepkg's LTO, and a bump with no
+  agent.** omarchy-cli's bump to v1.1.4 failed on both architectures
+  (#435), and both moved one recipe: the aarch64 one approved at 0.0.168
+  (task 1410). The daily check read one approval per name, so x86_64's
+  bump never started from x86_64's own (task 1582), which already had
+  `!lto` and `--package omarchy-cli` (but still tested the whole
+  workspace). Task 1410's recipe built and tested the whole workspace;
+  by v1.1.4 the workspace held a host agent, whose tests need a host, so
+  aarch64 failed in `check()`. x86_64 failed earlier, at the link, on
+  every `ring_core_0_17_14__*` symbol and four of zstd's — and still did
+  with `-p omarchy-cli` alone, reproduced on `linux/amd64`
+  `archlinux:base-devel` with Arch's `rust` 1.99. The
+  `x86_64-linux-gnu-gcc` in the error is only Arch's gcc under that name;
+  the cause is makepkg's `lto` option: `-flto=auto` in `CFLAGS` made the
+  `cc` crate's objects for ring and zstd-sys GCC bytecode alone (an empty
+  `.text`, only `.gnu.lto_*` sections), and Arch's `rust` links through
+  `gcc -fuse-ld=lld` (linker flavour `gnu-lld-cc`), which cannot read
+  them. Arch Linux ARM's `makepkg.conf` has `!lto`, so aarch64 linked.
+  With `options=('!lto')` the same x86_64 build links and its tests pass.
+  What followed: the *Rust* skill (the package's crate with `-p`, `!lto`)
+  and the prompt's Rust rule; the gate's `lto` warning, read from the
+  options makepkg sees; each architecture's bump from its own approval;
+  and, since a bump moves a recipe and has no agent to correct one, an
+  architecture whose last bump failed, or already left the approved
+  recipe, gets its next one drafted from that build until a newer one is
+  approved — or, for a package that ships its own PKGBUILD, built from
+  that PKGBUILD at the tag. A bump is told by what only the server writes
+  (`params.bump`), never by a reason the asker sends.

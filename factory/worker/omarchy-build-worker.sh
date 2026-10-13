@@ -325,6 +325,20 @@ artifact() { # task file dest
   curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.omarchy-pool.org}/api/v1/factory/tasks/$1/artifacts/$2" -o "$3"
 }
 
+# A draft that learned from a recipe of another version tends to keep that
+# version's checksums (draft 1628 called its lesson's real sha256 "a
+# placeholder"): makepkg's validity check fails it and a drafter turn goes to
+# the sums — on an emulated lane, a long one. A draft's agent never saw the
+# sources, so it has no sums of its own to keep: when its pkgver is not the
+# lesson's they are made again from the sources, as a bump's are (#435).
+lesson_sums() { # lesson-PKGBUILD recipe-dir → updpkgsums in recipe-dir when the two pkgvers differ
+  local was now
+  was="$(sed -n 's/^pkgver=//p' "$1" 2>/dev/null | head -n1)"; now="$(sed -n 's/^pkgver=//p' "$2/PKGBUILD" 2>/dev/null | head -n1)"
+  [[ -n "$now" && "$was" != "$now" ]] || return 0
+  echo "==> pkgver $now is not the lesson's (${was:-none}): its checksums are made again from the sources"
+  { chown -R builder:builder "$2" && (cd "$2" && as_builder updpkgsums); } || echo "updpkgsums failed; the build will tell"
+}
+
 fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
   local name="$1" ref="$2"
   rm -rf /build/pkg /build/src
@@ -387,6 +401,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     if [[ -s /build/PKGBUILD.prev ]]; then
       echo "==> The lesson: the PKGBUILD of build $LESSON_TASK$( [[ -s /build/lesson.log ]] && echo " and what stopped it" )${BUILD_HINT:+; the hint from the person who asked: $BUILD_HINT}"
       with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg "${ver_arg[@]}" --previous /build/PKGBUILD.prev $( [[ -s /build/lesson.log ]] && echo "--log /build/lesson.log" ) ${BUILD_HINT:+--hint="$BUILD_HINT"}
+      lesson_sums /build/PKGBUILD.prev /build/pkg
     else
       with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg "${ver_arg[@]}" ${BUILD_HINT:+--hint="$BUILD_HINT"}
     fi
@@ -746,6 +761,25 @@ desktop_app_checks() { # /usr/bin/name real-executable entries
   echo "runs $exe, every library resolves$( [[ -n "$entries" ]] && echo ", $(wc -w <<<"$entries") desktop entry(ies) valid" || echo ", no desktop entry")"
   return 0
 }
+# A recipe's text without its comments: a whole-line `#…`, and a ` #…` after code (a `#` inside a word, `$#`, `${#x}`, stays).
+recipe_code() { sed -e 's/^[[:space:]]*#.*$//' -e 's/[[:space:]]#.*$//' "$1" 2>/dev/null; }
+# Whether a recipe runs cargo: `cargo …`, `/usr/bin/cargo …`, after `;`, `&&`, `|` or `(` — a comment or makedepends=('cargo') is not running it.
+cargo_runs() { # PKGBUILD → 0 when a line of it runs cargo
+  recipe_code "$1" | grep -qE '(^|[[:space:];&|(/])cargo[[:space:]]'
+}
+# A recipe that runs cargo and leaves makepkg's lto option on (Arch's makepkg.conf turns it on): no `!lto` among the
+# options makepkg reads — .SRCINFO's, as install_deps reads the dependencies, so a commented-out options line or a
+# "!lto" in a function body counts for nothing. A recipe makepkg cannot read is weighed by its text, comments aside.
+cargo_lto_on() { # PKGBUILD → 0 when cargo runs with lto on
+  local info
+  cargo_runs "$1" || return 1
+  if info="$(cd "$(dirname "$1")" && as_builder makepkg --printsrcinfo 2>/dev/null)" && grep -q '^pkgbase = ' <<<"$info"; then
+    grep -qx $'\toptions = !lto' <<<"$info" && return 1
+  else
+    recipe_code "$1" | grep -qE "(^|[[:space:](])[\"']?!lto([\"'[:space:])]|$)" && return 1
+  fi
+  return 0
+}
 vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and tests.log
   local name="$1" pkgs=(/build/out/*.pkg.tar.zst) out fails
   echo '{"schema":"omarchy-pool/vet/1","verdict":"pending","checks":[]}' >"$VET_JSON"; : >"$VET_LOG"
@@ -791,6 +825,13 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
       vet_add "prebuilt-debug:$(basename "$p")" fail "a -debug split of a package that compiled nothing — set options=('!debug') in the PKGBUILD (a prebuilt binary carries no debug info of ours)"
     done
   fi
+  # 4c. a Rust recipe with makepkg's lto on: the cc crate compiles a crate's C (ring, aws-lc-sys) with -flto=auto,
+  # GCC writes bytecode-only objects, and Arch's rust links through ld.lld, which cannot read them. Arch's x86_64
+  # makepkg.conf turns lto on and Arch Linux ARM's off, so the x86_64 link fails on symbols the aarch64 one finds
+  # (omarchy-cli v1.1.4, #435). Built here, it may still fail on the other architecture: a warning, so the
+  # maintainer sees it before that build does (skills: Rust).
+  if cargo_lto_on /build/pkg/PKGBUILD; then vet_add lto warn "cargo builds with makepkg's lto on: set options=('!lto') — Arch's rust links with ld.lld, which cannot read the GCC LTO objects of a crate's C sources, and x86_64's makepkg.conf turns lto on"
+  elif cargo_runs /build/pkg/PKGBUILD; then vet_add lto pass "cargo builds with options=('!lto')"; fi
   # 5. the file list: standard paths only, no libtool archives, not empty.
   for p in "${pkgs[@]}"; do
     out="$(pacman -Qlp "$p" 2>/dev/null | awk '{print $2}')"

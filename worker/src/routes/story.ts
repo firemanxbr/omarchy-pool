@@ -9,7 +9,7 @@
  */
 import { json, type Env } from "../index";
 import { RINGS, ringsSql } from "../meta";
-import { scoreChain, type Score } from "../score";
+import { isBump, scoreChain, type Score } from "../score";
 import { requestChecks, type RequestRow, type RequestChecks } from "../request";
 import { recordUrl } from "../record";
 import { queuePosition } from "../queue";
@@ -144,7 +144,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
     const withdrawn = mine.find((a) => a.withdrawn_at) ?? null;
     const auditReport = audit?.result as { verdict?: string; findings?: { severity: string }[] } | null | undefined;
     const score = scoreChain({
-      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status, version: contributor.version, bump: !!contributor.pkgbuild_ref?.startsWith("bump:") } : null,
+      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status, version: contributor.version, bump: isBump(contributor) } : null,
       vet: vetOf(contributor),
       audit: audit ? { status: audit.status, verdict: auditReport?.verdict ?? null, high: (auditReport?.findings ?? []).filter((f) => f.severity === "high").length, findings: (auditReport?.findings ?? []).length } : null,
       request,

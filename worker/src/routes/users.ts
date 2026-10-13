@@ -7,6 +7,7 @@ import { asReviews, stands, wholeReviews } from "./review";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { standsSql } from "./story";
 import { parseTargets } from "../targets";
+import { BUMP_SQL } from "../score";
 import { REVERTED_COLUMNS, SOAK_COLUMNS } from "../hosts";
 import { drainFacts, orderVerdicts, type OrderFacts, type OrderWorker } from "../orders";
 
@@ -45,7 +46,7 @@ export async function recordOf(env: Env, login: string): Promise<TrackRecord> {
   const [built, reviewed, donated, decided] = await Promise.all([
     env.DB.prepare(
       `SELECT SUM(CASE WHEN staged_prefix IS NOT NULL THEN 1 ELSE 0 END) AS staged,
-              SUM(CASE WHEN staged_prefix IS NOT NULL AND pkgbuild_ref LIKE 'bump:%' THEN 1 ELSE 0 END) AS bumps
+              SUM(CASE WHEN staged_prefix IS NOT NULL AND ${BUMP_SQL} THEN 1 ELSE 0 END) AS bumps
          FROM build_tasks WHERE owner = ? AND kind = 'build' AND trust = 'community'`,
     ).bind(login).first<{ staged: number | null; bumps: number | null }>(),
     env.DB.prepare(

@@ -3949,7 +3949,20 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
     community build from the approved PKGBUILD with `pkgver` moved to the
     tag (`bump:<task>@<tag>`, `updpkgsums` in the worker), into the queue
     at once, as a request's build (#343: the fourteen days a bump waited for
-    its owner's own worker are gone). (A contributor's request lands in the
+    its owner's own worker are gone). Each architecture starts from its own
+    standing approval, the name's newest where it has none. An architecture
+    whose last bump since that approval failed, or had already left the
+    approved recipe, leaves it too: a draft (`draft:<url>@<tag>`,
+    `params.lesson` that last bump once it ended; its checksums made again
+    with `updpkgsums` when its `pkgver` is not the lesson's), or the source's own
+    PKGBUILD at the tag for a package that has one (`<url>@<tag>:<path>`);
+    the journal's `bump` line names each such architecture, how and after
+    which build (*x86_64 drafted for the tag (its last bump, build N,
+    failed)*). The approved recipe would fail the same way, and only a
+    draft has an agent (#435); a newer approval brings the bump back to
+    it. Every bump carries `params.bump` (the tag) — the score and the
+    track record read that, not `reason`, and a Build sent with a reason
+    starting *bump to* is a 400. (A contributor's request lands in the
     queue the same way — the next host of the architecture with room takes
     it, contributors' builds in turn by owner — and a build asked for one
     worker — `worker` in `POST /factory/packages/<name>/build`, `pinned_to`

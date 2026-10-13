@@ -622,10 +622,13 @@ describe("dashboard pages", () => {
     // What we test is the skills the agents read (factory/skills), one text: the general one, then the groups, then the log.
     const { SKILLS } = await import("../src/pages/docs-tree");
     const test = await (await get("/docs/what-we-test")).text();
-    expect(SKILLS.map((k) => k.file)).toEqual(["factory/skills/general/every-package.md", "factory/skills/groups/desktop-apps.md", "factory/skills/groups/prebuilt-binaries.md"]);
-    for (const id of ["why-we-test-the-way-we-test", "every-package", "desktop-apps", "prebuilt-binaries", "who-does-what", "the-score", "how-this-page-grows", "what-we-learned"]) expect(test, id).toContain(`id="${id}"`);
+    expect(SKILLS.map((k) => k.file)).toEqual(["factory/skills/general/every-package.md", "factory/skills/groups/desktop-apps.md", "factory/skills/groups/prebuilt-binaries.md", "factory/skills/groups/rust.md"]);
+    for (const id of ["why-we-test-the-way-we-test", "every-package", "desktop-apps", "prebuilt-binaries", "rust", "who-does-what", "the-score", "how-this-page-grows", "what-we-learned"]) expect(test, id).toContain(`id="${id}"`);
     expect(test.indexOf('id="every-package"')).toBeLessThan(test.indexOf('id="desktop-apps"'));
     expect(test).toContain("ozone-platform-hint=auto");
+    // The Rust skill (#435): the package's crate alone, and makepkg's lto off — the gate's check by its name.
+    expect(test).toContain("<code>cargo build --frozen --release -p &lt;crate&gt;</code>");
+    expect(test).toContain("[lto]");
     expect(test).not.toContain("<!-- skills -->");
     const res = await get("/how-it-works");
     expect(res.status).toBe(301);

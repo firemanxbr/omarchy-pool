@@ -25,6 +25,7 @@ import whatWeTest from "../docs/what-we-test.md";
 import skillEveryPackage from "../../../factory/skills/general/every-package.md";
 import skillDesktopApps from "../../../factory/skills/groups/desktop-apps.md";
 import skillPrebuiltBinaries from "../../../factory/skills/groups/prebuilt-binaries.md";
+import skillRust from "../../../factory/skills/groups/rust.md";
 
 export type DocKey =
   | "index"
@@ -87,6 +88,7 @@ export const SKILLS: { file: string; text: string }[] = [
   { file: "factory/skills/general/every-package.md", text: skillEveryPackage },
   { file: "factory/skills/groups/desktop-apps.md", text: skillDesktopApps },
   { file: "factory/skills/groups/prebuilt-binaries.md", text: skillPrebuiltBinaries },
+  { file: "factory/skills/groups/rust.md", text: skillRust },
 ];
 const WHAT_WE_TEST = whatWeTest.replace("<!-- skills -->", SKILLS.map((s) => s.text.trim()).join("\n\n"));
 /** The four confirmations where the factory chapter names them: the request form's own sentences (CHECKLIST, src/request.ts), never a paraphrase — one item each, nested under the step (markdown.ts nests a list by its indent). */

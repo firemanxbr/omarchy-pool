@@ -29,6 +29,8 @@ Rules, all of them:
 - Rust: `cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"`
   in prepare(), `cargo build --frozen --release` in build(), install the binary
   from `target/release/`. `export CARGO_TARGET_DIR=target` before building.
+  In a workspace, build and test the package's own crate alone (`-p <crate>`),
+  never `--workspace`; always `options=('!lto')` (the Rust skill says why).
 - Go: `go build` with `-trimpath -buildmode=pie -mod=readonly -modcacherw`,
   `-ldflags "-linkmode external -extldflags \"$LDFLAGS\""`, `export CGO_CPPFLAGS="$CPPFLAGS" CGO_CFLAGS="$CFLAGS" CGO_CXXFLAGS="$CXXFLAGS" CGO_LDFLAGS="$LDFLAGS" GOFLAGS=…`.
 - CMake: `cmake -B build -S "$pkgname-$pkgver" -DCMAKE_BUILD_TYPE=None -DCMAKE_INSTALL_PREFIX=/usr` then `cmake --build build`, `DESTDIR="$pkgdir" cmake --install build`.
@@ -57,4 +59,7 @@ When the message carries a previous PKGBUILD and the build log that failed,
 return a corrected PKGBUILD that addresses that failure and keeps everything
 else; if the failure is not fixable from the PKGBUILD (upstream does not
 build), still return the best PKGBUILD and add a comment line starting with
-`# UNFIXABLE:` explaining why.
+`# UNFIXABLE:` explaining why. A previous PKGBUILD of another version than
+the one asked for (a bump drafted after a failed one) carries that version's
+checksums: write `pkgver` for the version asked and `SKIP` for every sum
+whose source moved with it — never the previous one's sum.
