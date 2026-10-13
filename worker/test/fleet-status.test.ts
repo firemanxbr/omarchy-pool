@@ -4,7 +4,8 @@
  *
  * - each line on its own, on a fixed clock (fleet.ts): a host silent for ten
  *   minutes (one whose last report said it sleeps, only a day on); behind 45
- *   minutes after a deploy; rolled back; a task lost on it (readopt-failed);
+ *   minutes after a deploy; rolled back; a task container lost on it
+ *   (readopt-failed) — a pool job lost with its dispatcher an info line;
  *   its disk under the floor; a lane held for binfmt in the pool's words,
  *   never the agent's (nor the envelope's own choice); a task clamped to the
  *   largest host; a host reserving for over an hour; a verify failure as an
@@ -27,11 +28,13 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
-import { capacityLines, capacityOf, fleetHostOf, heldWords, hostLines, secondOpinionOf, span, verifyFailureOf, ASLEEP_QUIET_H, type FleetHostRow, type FleetLease } from "../src/fleet";
+import { capacityLines, capacityOf, fleetHostOf, heldWords, hostLines, poolJobOf, secondOpinionOf, span, verifyFailureOf, ASLEEP_QUIET_H, type FleetHostRow, type FleetLease } from "../src/fleet";
 import { selectionRules } from "../src/routes/factory";
 import { AUDITS_7D_SQL, BUSY_7D_SQL, FLEET_EVENTS_SQL, FLEET_LEASES_SQL, HOST_LEASES_SQL, MODEL_MIX_SQL, QUEUE_BY_ARCH_SQL } from "../src/routes/hosts";
 import { DISK_FLOOR_GB } from "../src/hosts";
 import { declared, runScript, scriptOf } from "./fixture";
+import jobsSource from "../../crates/pkg-repo/src/dispatch/jobs.rs?raw";
+import dispatchSource from "../../crates/pkg-repo/src/dispatch/mod.rs?raw";
 import { toB64url } from "../src/webauthn";
 
 const ORIGIN = "http://pool.test";
@@ -103,6 +106,31 @@ describe("each host's Status lines (fleet.ts hostLines)", () => {
     expect(hostLines([row({ capacity: capOf({ held_lanes: [{ arch: "x86_64", reason: "off: the envelope's emulate does not list it" }] }) })], NONE, POOL, NOW)).toEqual([]);
     expect(hostLines([row({ reserving_task: 4242, reserving_since: ago(59) })], NONE, POOL, NOW)).toEqual([]);
     expect(hostLines([row({ reserving_task: 4242, reserving_since: ago(75) })], NONE, POOL, NOW)).toEqual([expect.objectContaining({ kind: "reserving", task: 4242, text: "reserving for task #4242 for 1 h 15 min: it takes nothing else but pool jobs until its units fit it" })]);
+  });
+
+  it("a pool job lost with its dispatcher (a release, a restart) is an info line, never readopt-failed: only a task container's loss warns (#319)", () => {
+    // 2026-10-12 19:46 UTC: the v1.1.4 rollout on studio-m2 replaced its dispatcher while it ran publish task 1590 — lost by design (a pool
+    // job runs in the dispatcher's own process tree), back in the queue, and it ran again. No container was lost: no warning.
+    const lostOf = (...l: { task: number; kind?: string | null; worker?: string }[]) => ({ lost: l.map((x) => ({ worker: "m1-studio-ab12", at: ago(5), ...x })), clamped: [] });
+    expect(hostLines([row()], lostOf({ task: 1590, kind: "publish" }), POOL, NOW)).toEqual([{
+      level: "info", kind: "pool-job-lost", host: { id: "h_studio0001", name: "studio", owner: "m1" },
+      text: "1 pool job lost in the last hour (#1590): it ended with its dispatcher at a release or a restart (a pool job runs in the dispatcher's own process tree) or was handed back before it started — back in the queue, its attempt given back",
+    }]);
+    // The dispatcher's own lists decide: every pool kind (dispatch/jobs.rs POOL_KINDS) a pool job's loss, every task container's kind
+    // (dispatch/mod.rs KINDS: a build — a draft, a bump, a review rebuild —, a trial, an audit) a readopt-failed.
+    const list = (src: string, name: string) => [...src.match(new RegExp(`pub const ${name}: \\[&str; \\d+\\] = \\[([^\\]]*)\\]`))![1].matchAll(/"([a-z-]+)"/g)].map((m) => m[1]);
+    const pool = list(jobsSource, "POOL_KINDS"), containers = list(dispatchSource, "KINDS");
+    expect(pool).toEqual(expect.arrayContaining(["sync", "render", "promote", "rollback", "security", "gc", "verify", "relayout", "enqueue", "publish", "health"]));
+    expect(containers).toEqual(["build", "trial", "audit"]);
+    for (const kind of pool) expect([kind, kinds(hostLines([row()], lostOf({ task: 1, kind }), POOL, NOW))]).toEqual([kind, ["pool-job-lost"]]);
+    for (const kind of containers) expect([kind, kinds(hostLines([row()], lostOf({ task: 1, kind }), POOL, NOW))]).toEqual([kind, ["readopt-failed"]]);
+    // A line written before its fail named the task's kind is counted as a container's, as it was.
+    expect([poolJobOf(undefined), poolJobOf(null), poolJobOf(""), poolJobOf("build"), poolJobOf("publish")]).toEqual([false, false, false, false, true]);
+    // Both on one host: the containers warn, the jobs say it as info, after every warning; another host's losses are its own.
+    const both = hostLines([row()], lostOf({ task: 812, kind: "build" }, { task: 1590, kind: "publish" }, { task: 700 }, { task: 1591, kind: "sync" }, { task: 9, kind: "build", worker: "someone-else" }), POOL, NOW);
+    expect(both.map((l) => [l.level, l.kind])).toEqual([["warn", "readopt-failed"], ["info", "pool-job-lost"]]);
+    expect(both[0].text).toBe("readopt-failed: 2 tasks lost in the last hour (#812, #700) — a container gone when its dispatcher came back (a reboot, an engine restart, the disk watcher); each back in the queue, its attempt given back");
+    expect(both[1].text).toBe("2 pool jobs lost in the last hour (#1590, #1591): each ended with its dispatcher at a release or a restart (a pool job runs in the dispatcher's own process tree) or was handed back before it started — back in the queue, its attempt given back");
   });
 
   it("a verify failure is an error naming the failed check; a floor's refusal is the agent keeping its rules", () => {
@@ -316,9 +344,11 @@ beforeAll(async () => {
   await task({ arch: "x86_64", ago: 75, params: { needs_native: 1 } });
   await task({ arch: "x86_64", ago: 40, params: { needs_native: 1 } });
   await task({ arch: "x86_64", ago: 10 });
-  // A task lost on the Studio a few minutes ago, and one clamped to it.
+  // A task lost on the Studio a few minutes ago (its line from before a fail named the task's kind), a pool job lost with its dispatcher
+  // (the line as a fail writes it now), and one clamped to it.
   await env.DB.batch([
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('build', NULL, 'factory', 'warn', 'zstd for aarch64 lost', ?)").bind(JSON.stringify({ task: 4001, arch: "aarch64", worker: studioReg, attempts: 0, exhausted: false, final: false, needs_native: false, lost: true, oom: false })),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('build', NULL, 'factory', 'warn', ?, ?)").bind(`omarchy-cli for x86_64 lost on ${studioReg} (a host event, 1 of 2) — back in the queue, the attempt given back: its job's process ended with the dispatcher that ran it (a pool job runs in the dispatcher's own process tree)`, JSON.stringify({ task: 4003, kind: "publish", arch: "x86_64", worker: studioReg, attempts: 0, exhausted: false, final: false, needs_native: false, lost: true, oom: false })),
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('build', NULL, 'factory', 'warn', ?, ?)").bind(`chromium for aarch64 (task 4002) asked size 4; the largest host alive runs size 3: it runs clamped on ${studioReg}`, JSON.stringify({ task: 4002, name: "chromium", arch: "aarch64", asked: 4, size: 3, worker: studioReg, clamped: true })),
   ]);
   // Last week's audit of the project's copy of a package, by the model that built it.
@@ -351,6 +381,7 @@ describe("GET /api/v1/hosts/fleet (#324)", () => {
       "warn capacity x86_64",
       "warn needs-native x86_64",
       "warn second-opinion",
+      "info pool-job-lost studio",
     ]);
     const line = (kind: string) => f.lines.find((l: any) => l.kind === kind).text;
     // A host that stops reporting shows within ten minutes; a verify failure is an error with the failed check.
@@ -359,7 +390,9 @@ describe("GET /api/v1/hosts/fleet (#324)", () => {
     // The x86_64 backlog, no free x86_64 build for over an hour: the free units native and emulated, the native waits counted.
     expect(line("capacity")).toBe("x86_64: 3 tasks queued, the oldest waited 1 h 15 min; free native units: 0, free emulated units: 0");
     expect(line("needs-native")).toBe("tasks waiting for a native x86_64 host: 2");
-    expect(line("readopt-failed")).toContain("(#4001)");
+    // The task container's loss warns; the pool job's is an info line of its own, never in readopt-failed.
+    expect(line("readopt-failed")).toContain("1 task lost in the last hour (#4001)");
+    expect(line("pool-job-lost")).toMatch(/^1 pool job lost in the last hour \(#4003\): it ended with its dispatcher at a release or a restart/);
     expect(line("clamped")).toContain("chromium for aarch64 (task 4002) asked size 4");
     // The second opinion: the mix of the registrations alive, and last week's publish-bound audit that was independent: none.
     expect(f.second_opinion).toMatchObject({ audits: 1, none: 1, share_none: 1 });

@@ -258,7 +258,8 @@ architecture, native or emulated. Those check containers, and the enqueue's
 reader of the recipes on `main` (on your host's own architecture), start
 through `omarchy-task-run`, which runs them as it runs a task container: on
 the job's own network behind its egress sidecar, with no token and nothing
-of the host but the job's scratch directory. Nothing to set up on your side:
+of the host but the job's scratch directory (on a daemon with userns-remap,
+opened to the helper's remapped root before it starts, #407). Nothing to set up on your side:
 the dispatcher claims pool jobs on its own, and the pool hands them to a host
 only once the maintainers' `host-pool-jobs` setting names it — `*`, every
 host, since the legacy registrations retired; the Studio canary was the
@@ -330,7 +331,12 @@ hands a host work* has the rules.
 The host's page, `/hosts/<id>` (#324), shows you and the other maintainers
 everything its agent reports: the runtime and its versions (the agent's,
 the compose plugin and docker CLI the release pins), the isolation level
-and whether the machine is dedicated; CPUs, memory, the free disk on the
+and whether the machine is dedicated (as its last report's
+`run/capacity.json` says them, #407, a file the running agent does not
+count again: after a daemon moves to userns-remap, the install run again,
+or `omarchy-agent capacity --write`, rewrites it and the next report says
+`subuid`; the way back the same with `root`; the journal has a line for
+each change); CPUs, memory, the free disk on the
 work root and on the engine's data root, the units the pool counts — busy,
 free for a task, the one kept for pool jobs —, the agent slots, your caps
 (the envelope's) and the pool's cap, which you or any maintainer edit there

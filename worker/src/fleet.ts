@@ -23,7 +23,7 @@
  * own words — those stay on the host's page, its owner's and the maintainers'.
  */
 import { DISK_FLOOR_GB, HOST_REPORT_FRESH_MIN, TASK_UNITS, hostLine, type Arch, type Capacity, type Lane } from "./hosts";
-import { ALIVE_MS, LANE_KINDS, diskOf, noRoom, roomOf, unitsOf, type Rules } from "./selection";
+import { ALIVE_MS, LANE_KINDS, TASK_KINDS, diskOf, noRoom, roomOf, unitsOf, type Rules } from "./selection";
 import { UPDATE_GRACE_MINUTES, compareTags, parseTag } from "./update";
 
 const MIN = 60_000;
@@ -42,7 +42,11 @@ export const BEHIND_MIN = UPDATE_GRACE_MINUTES;
 export const CAPACITY_WAIT_MIN = 60;
 /** A host reserving for a large task longer than this is a warning (§18.3; the reservation's window is two hours). */
 export const RESERVING_WARN_MIN = 60;
-/** A task a host lost (its `lost` fail: a container gone when its dispatcher came back) is a readopt-failed line this long. */
+/**
+ * A task a host lost (its `lost` fail) is a line this long: a task container's (a build, a trial, an audit) a readopt-failed warning — a
+ * container gone when its dispatcher came back —, a pool job's an info line: it runs in its dispatcher's own process tree and ends with it
+ * at a release or a restart by design (crates/pkg-repo dispatch `readopt_job`).
+ */
 export const LOST_WINDOW_MIN = 60;
 /** A task clamped to the largest host alive is a line this long after its lease. */
 export const CLAMPED_WINDOW_H = 24;
@@ -58,7 +62,7 @@ export type LineKind =
   | "refused"
   | "capacity" | "needs-native"
   | "second-opinion"
-  | "new-host" | "agent-rollback";
+  | "new-host" | "agent-rollback" | "pool-job-lost";
 export interface StatusLine { level: Level; kind: LineKind; text: string; host?: { id: string; name: string; owner: string }; arch?: string; task?: number }
 
 /** A host as the fleet's read gives it (routes/hosts.ts FLEET_HOSTS_SQL): its row, and its registration's liveness and drain. */
@@ -236,6 +240,18 @@ export interface Need { what: NeedKind; text: string }
 const AGENT_NEEDS: readonly NeedKind[] = ["linger", "credentials", "docker-group", "binfmt", "cgroups", "hosting"];
 
 /**
+ * The hosting requirement (D42, design v2 §19.1, §19.3) an isolation level does not meet as a new host would, as install's
+ * preflight words it — the level a task-container escape lands at —, or null when it meets it: the page's hosting item, and the
+ * journal line's status when a report changes the level (#407).
+ */
+export function hostingShortOf(isolation: string | null, dedicated: number | null): string | null {
+  if (isolation === "root") return "isolation root: a rootful daemon without userns-remap — a task-container escape lands as root on the host; the Studio's recorded exception until P6, refused for a new host (prep-root.sh sets userns-remap on a new daemon)";
+  if (isolation === "user" && dedicated === 0) return "isolation user on a machine not dedicated to it: a rootless runtime at the user level runs only on a dedicated machine or VM — on a shared one, a dedicated Unix user with rootless podman at the subuid level";
+  if (isolation === "vm-shared" && dedicated === 0) return "isolation vm-shared without --dedicated: Docker Desktop's or OrbStack's VM qualifies only with the home mount removed and its owner's word that nothing else runs in it";
+  return null;
+}
+
+/**
  * What only a person can fix on a host (design v2 §18.1), from its status and its last report: its owner's Confirm; a
  * suspension, or the maintainer list's stop; below the minimum; the free disk under the signed floor; an emulated lane held
  * for binfmt; limits the runtime does not enforce (cgroup delegation); the hosting requirement its isolation level does not
@@ -260,10 +276,8 @@ export function needsPersonOf(h: Pick<FleetHostRow, "status" | "owner_login" | "
     const missing = [[limits.cpus_hard, "--cpus"], [limits.memory_hard, "--memory"], [limits.pids, "--pids-limit"]].filter(([ok]) => !ok).map(([, f]) => f).join(", ");
     add("cgroups", `limits cannot be enforced: its runtime ignores ${missing}${h.isolation === "user" || h.isolation === "subuid" ? " — a rootless runtime needs systemd to delegate cpu, memory and pids to the agent's user (cgroup v2)" : ""}`);
   }
-  // The hosting requirement (D42, design v2 §19.1, §19.3), as install's preflight words it: the level a task-container escape lands at.
-  if (h.isolation === "root") add("hosting", "isolation root: a rootful daemon without userns-remap — a task-container escape lands as root on the host; the Studio's recorded exception until P6, refused for a new host (prep-root.sh sets userns-remap on a new daemon)");
-  else if (h.isolation === "user" && h.dedicated === 0) add("hosting", "isolation user on a machine not dedicated to it: a rootless runtime at the user level runs only on a dedicated machine or VM — on a shared one, a dedicated Unix user with rootless podman at the subuid level");
-  else if (h.isolation === "vm-shared" && h.dedicated === 0) add("hosting", "isolation vm-shared without --dedicated: Docker Desktop's or OrbStack's VM qualifies only with the home mount removed and its owner's word that nothing else runs in it");
+  const hosting = hostingShortOf(h.isolation, h.dedicated);
+  if (hosting) add("hosting", hosting);
   // A round that ended on what only a person fixes (run/rollout.rs): the engine refusing the agent's user, a VM, a clock.
   const round = roundOf(report);
   if (round && /needs a person/i.test(round.detail)) {
@@ -285,13 +299,23 @@ export function needsPersonOf(h: Pick<FleetHostRow, "status" | "owner_login" | "
 
 /** What the lines read besides the hosts: the pool's release, the lost tasks and the clamps of the journal. */
 export interface FleetEvents {
-  /** `lost` fails of host leases in the last LOST_WINDOW_MIN (events, kind build): the registration and the task. */
-  lost: { worker: string; task: number; at: string }[];
+  /**
+   * `lost` fails of host leases in the last LOST_WINDOW_MIN (events, kind build): the registration, the task and its kind — the line's
+   * own `kind` (routes/factory.ts handleFail), absent on one written before it named it, which is counted as a task container's.
+   */
+  lost: { worker: string; task: number; at: string; kind?: string | null }[];
   /** Clamps to the largest host alive in the last CLAMPED_WINDOW_H (events, kind build): the task and the journal's words. */
   clamped: { task: number; summary: string; at: string }[];
 }
 
 const who = (h: Pick<FleetHostRow, "id" | "name" | "owner_login">) => ({ id: h.id, name: h.name, owner: h.owner_login });
+/** The lost lines' window as they say it. */
+const LOST_WINDOW = LOST_WINDOW_MIN === 60 ? "hour" : span(LOST_WINDOW_MIN * MIN);
+/**
+ * Whether a lost task was a pool job: any kind but a task container's (selection.ts TASK_KINDS: a build — a draft, a bump, a review
+ * rebuild among them —, a trial, an audit). A line that names no kind (written before its fail named one) is counted as a container's.
+ */
+export const poolJobOf = (kind: string | null | undefined): boolean => typeof kind === "string" && kind.length > 0 && !TASK_KINDS.includes(kind);
 
 /**
  * A held lane's reason in the pool's words, for Status (public): the class of what its agent said (crates/omarchy-agent
@@ -329,8 +353,10 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
     else if (!silent && p && applied && compareTags(applied, p) < 0 && Number.isFinite(deployed) && now - deployed >= BEHIND_MIN * MIN && !(h.soaking_until && Date.parse(h.soaking_until) > now)) {
       out.push({ level: "warn", kind: "behind", host, text: `behind: it runs ${h.release_applied}, ${span(now - deployed)} after the deploy of ${pool.version} — its last round: ${round ? round.outcome : "none reported"} (its page has why)` });
     }
-    const lost = ev.lost.filter((l) => l.worker === h.worker_id);
-    if (lost.length) out.push({ level: "warn", kind: "readopt-failed", host, text: `readopt-failed: ${lost.length} task${lost.length === 1 ? "" : "s"} lost in the last ${LOST_WINDOW_MIN === 60 ? "hour" : span(LOST_WINDOW_MIN * MIN)} (${lost.map((l) => `#${l.task}`).join(", ")}) — a container gone when its dispatcher came back (a reboot, an engine restart, the disk watcher); each back in the queue, its attempt given back` });
+    // A task container lost (a build, a trial, an audit) is a readopt-failed warning; a pool job lost is an info line below.
+    const lostHere = ev.lost.filter((l) => l.worker === h.worker_id);
+    const lost = lostHere.filter((l) => !poolJobOf(l.kind)), jobsLost = lostHere.filter((l) => poolJobOf(l.kind));
+    if (lost.length) out.push({ level: "warn", kind: "readopt-failed", host, text: `readopt-failed: ${lost.length} task${lost.length === 1 ? "" : "s"} lost in the last ${LOST_WINDOW} (${lost.map((l) => `#${l.task}`).join(", ")}) — a container gone when its dispatcher came back (a reboot, an engine restart, the disk watcher); each back in the queue, its attempt given back` });
     const c = json<KeptCapacity | null>(h.capacity, null);
     const d = c?.disk_free_gb;
     if (!silent && d && (d.work < DISK_FLOOR_GB || d.engine < DISK_FLOOR_GB)) out.push({ level: "warn", kind: "disk-low", host, text: `disk-low: ${d.work} GB free on the work root and ${d.engine} on the engine's data root, below the ${DISK_FLOOR_GB} GB floor — it claims no build until there is room` });
@@ -344,6 +370,11 @@ export function hostLines(rows: FleetHostRow[], ev: FleetEvents, pool: { version
     // Info: an agent self-rollback, while its agent skips the version that did not pass its health gate.
     const skip = typeof report?.agent?.skip === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(report.agent.skip) ? (report.agent.skip as string) : null;
     if (round?.outcome === "agent-rollback" || skip) out.push({ level: "info", kind: "agent-rollback", host, text: `an agent self-rollback: ${skip ? `agent ${skip} did not pass its health gate and is skipped here until a higher one` : "its last round rolled its agent back (its page has why)"}` });
+    // Info: a pool job lost — what a release or a restart does to the one its dispatcher ran, by design; no container was lost.
+    if (jobsLost.length) {
+      const one = jobsLost.length === 1;
+      out.push({ level: "info", kind: "pool-job-lost", host, text: `${jobsLost.length} pool job${one ? "" : "s"} lost in the last ${LOST_WINDOW} (${jobsLost.map((l) => `#${l.task}`).join(", ")}): ${one ? "it" : "each"} ended with its dispatcher at a release or a restart (a pool job runs in the dispatcher's own process tree) or was handed back before it started — back in the queue, its attempt given back` });
+    }
   }
   // A new host, confirmed this week (D40's notice, for everyone).
   for (const h of rows) {

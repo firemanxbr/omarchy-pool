@@ -43,7 +43,7 @@ import { docChallenge, issueChallenge, PASSKEYS_SQL, justNowWords, relyingParty,
 import { toB64url } from "../webauthn";
 import { cancelOrdersOf, openOrdersOf, orderFacts, orderVerdicts, FOLLOW_POLL_S, type HeldTask, type OrderFacts, type OrderWorker } from "../orders";
 import {
-  aliveOf, capacityLines, capacityOf, fleetHostOf, hostLines, jobReservedOf, limitsOf, needsPersonOf, reportOf, roundOf, secondOpinionOf, silentOf,
+  aliveOf, capacityLines, capacityOf, fleetHostOf, hostingShortOf, hostLines, jobReservedOf, limitsOf, needsPersonOf, reportOf, roundOf, secondOpinionOf, silentOf,
   CLAMPED_WINDOW_H, LOST_WINDOW_MIN, QUEUED_KINDS, WEEK_DAYS,
   type AuditRow, type BusyRow, type FleetHostRow, type FleetLease, type MixRow, type QueueRow,
 } from "../fleet";
@@ -53,7 +53,7 @@ import {
   hostReason, revertedOf, HOST_REASON, OWNER_LISTED_SQL, OWNER_NOT_MAINTAINER,
   agentTakesOrders, isHostOrderKind, legacyOf, orderAnswers, HOST_ORDER_KINDS, HOST_ORDER_TTL_MIN, HOST_ORDERS_AGENT, asleepNow,
   agentTakesSettings, hostSettingsOf, orderArg, reportedBrakeOf, reportedSettingsOf, DIAGNOSTIC_LINE_MAX, DIAGNOSTIC_LINES, DIAGNOSTICS_MAX_BYTES, HOST_ORDER_ID, HOST_SETTINGS_AGENT, SETTINGS_ORDER_KINDS,
-  poolBehindOf, reportedSoakOf, sandboxAppliedOf, soakOf, HOST_ROW_TOUCH_MIN, PINNED_TOOLS,
+  poolBehindOf, reportedIsolation, reportedSoakOf, sandboxAppliedOf, soakOf, HOST_ROW_TOUCH_MIN, PINNED_TOOLS,
   agentTakesOwner, ownerDoc, readOwnerDoc, reportedOwnerOf, sealKeyOf, sealedKeys, widening, HOST_OWNER_AGENT, OWNER_DOC_TTL_MIN, OWNER_ORDER_KINDS, PIN_DOC_TTL_MIN,
   type Capacity, type HostOrderKind, type Isolation, type OrderArg, type OwnerAct, type OwnerDocInput,
 } from "../hosts";
@@ -349,9 +349,9 @@ export const BUSY_7D_SQL = `SELECT arch, lane, SUM(COALESCE(units, 1) * (juliand
   FROM build_tasks WHERE lease_gen IS NOT NULL AND lane IN ('native', 'emulated') AND kind IN (${QUEUED_KINDS.map((k) => `'${k}'`).join(", ")}) AND started_at IS NOT NULL
     AND (status = 'leased' OR (finished_at IS NOT NULL AND finished_at > ?2)) GROUP BY arch, lane`;
 /**
- * The journal's lines Status reads of the last day (by the kind index): a host lease lost (its fail's `lost`) and a task clamped to
- * the largest host alive (the claim's own line). Matched on the payload's text as the pool writes it (JSON.stringify, no spaces):
- * SQLite's JSON parser is never asked to read a line.
+ * The journal's lines Status reads of the last day (by the kind index): a host lease lost (its fail's `lost`, with the task's `kind`:
+ * a task container's or a pool job's) and a task clamped to the largest host alive (the claim's own line). Matched on the payload's
+ * text as the pool writes it (JSON.stringify, no spaces): SQLite's JSON parser is never asked to read a line, nor a task's row.
  */
 export const FLEET_EVENTS_SQL = `SELECT summary, payload, created_at FROM events WHERE kind = 'build' AND created_at > ?
   AND (payload LIKE '%"lost":true%' OR payload LIKE '%"clamped":true%') ORDER BY created_at DESC LIMIT 100`;
@@ -385,12 +385,12 @@ export async function handleFleet(env: Env): Promise<Response> {
   const leases = leaseRows.results as FleetLease[];
   const rules = selectionRules();
   const hosts = rows.map((h) => fleetHostOf(h, leases, now, rules));
-  const lost: { worker: string; task: number; at: string }[] = [], clamped: { task: number; summary: string; at: string }[] = [];
+  const lost: { worker: string; task: number; at: string; kind: string | null }[] = [], clamped: { task: number; summary: string; at: string }[] = [];
   for (const e of events.results as { summary: string; payload: string | null; created_at: string }[]) {
-    let p: { task?: unknown; worker?: unknown; lost?: unknown; clamped?: unknown } = {};
+    let p: { task?: unknown; kind?: unknown; worker?: unknown; lost?: unknown; clamped?: unknown } = {};
     try { p = e.payload ? JSON.parse(e.payload) : {}; } catch { continue; }
     if (typeof p.task !== "number") continue;
-    if (p.lost === true && typeof p.worker === "string" && Date.parse(e.created_at) > now - LOST_WINDOW_MIN * MIN) lost.push({ worker: p.worker, task: p.task, at: e.created_at });
+    if (p.lost === true && typeof p.worker === "string" && Date.parse(e.created_at) > now - LOST_WINDOW_MIN * MIN) lost.push({ worker: p.worker, task: p.task, at: e.created_at, kind: typeof p.kind === "string" ? p.kind : null });
     if (p.clamped === true && !clamped.some((x) => x.task === p.task)) clamped.push({ task: p.task, summary: e.summary, at: e.created_at });
   }
   const pool = version(env);
@@ -1534,9 +1534,11 @@ export async function handleHostToken(s: SignedHost, env: Env): Promise<Response
  * POST /hosts/self/report — the host report (design v2 §17.2), on every
  * change and at least every five minutes, at most 16 KiB. A report that
  * carries what looks like a secret is refused whole (leak.ts). The pool keeps
- * the last one and the columns its pages read; the units are its own count
- * from the reported totals. `asleep: true` (#329) — a Mac about to sleep —
- * gives the host zero free units until a report says otherwise (asleepNow).
+ * the last one and the columns its pages read — the isolation level and
+ * `dedicated` among them, from its runtime or else its capacity (#407,
+ * reportedIsolation), a change of either a line in the journal —; the
+ * units are its own count from the reported totals. `asleep: true` (#329) — a Mac about to sleep — gives the host zero
+ * free units until a report says otherwise (asleepNow).
  * D1 is written only on a change (#324): a report the same as the last one,
  * within HOST_ROW_TOUCH_MIN of it, writes nothing (`written: false`).
  */
@@ -1567,8 +1569,13 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   const runtime = r.runtime && typeof r.runtime === "object" ? r.runtime : null;
   // As the enrollment: whole or refused — a cut one would not parse on the hosts' pages.
   if (runtime && JSON.stringify(runtime).length > 2048) return json({ error: "runtime: an object of at most 2 KiB" }, 400, NO_STORE);
-  const isolation = runtime && ISOLATIONS.includes(runtime.isolation) ? (runtime.isolation as string) : h.isolation;
-  const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
+  // Its isolation level and `dedicated` (#407): the runtime's word, else its capacity's — run/capacity.json, where an agent up to
+  // 0.5.2 says them, as it is on the host: the running agent does not count it again, so after a daemon moves to userns-remap the
+  // install run again (or `omarchy-agent capacity --write`) rewrites it and the next report carries `subuid`, the way back the same
+  // with `root`. One it does not say, or says with a word the pool does not know, keeps the row's.
+  const said = reportedIsolation(runtime, cap ? r.capacity : null);
+  const isolation = said.isolation ?? h.isolation;
+  const dedicated = said.dedicated === undefined ? h.dedicated : said.dedicated ? 1 : 0;
   // A Mac about to sleep, or asleep (#329): from the first report that says so until one that does not (an agent that does not
   // say is awake).
   const asleep = r.asleep === true;
@@ -1600,12 +1607,25 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
       h.id,
     )
     .run();
+  // The journal says when its level or `dedicated` changes (#407), once each: the row, the page and the fleet show only the
+  // current one. Its status is the hosting requirement's (fleet.ts hostingShortOf): warn when the new one does not meet it.
+  const levelOf = (i: string | null, d: number | null) => `${i ?? "unknown"}${d === 1 ? " (dedicated)" : d === 0 ? " (not dedicated)" : ""}`;
+  const leveled = isolation !== h.isolation || dedicated !== h.dedicated;
   if (!!behindWas !== !!behindNow) {
     const line = behindNow
       ? `${hostLine_(h)}: its agent reports the pool behind GitHub — GitHub's latest release has been ${behindNow.github} for more than a day (since ${behindNow.since}) while the pool names ${behindNow.pool}; nothing changes on the host: check the pool's deploys (freeze detection)`
       : `${hostLine_(h)}: its agent no longer reports the pool behind GitHub`;
     await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('host', NULL, 'factory', ?, ?, ?)")
       .bind(behindNow ? "warn" : "ok", line, JSON.stringify({ host: h.id, owner: h.owner_login, action: "pool-behind-github", ...(behindNow ?? { github: null, pool: null, since: null }) }))
+      .run();
+  }
+  if (leveled) {
+    await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('host', NULL, 'factory', ?, ?, ?)")
+      .bind(
+        hostingShortOf(isolation, dedicated) ? "warn" : "ok",
+        `${hostLine_(h)}: its agent reports isolation ${levelOf(h.isolation, h.dedicated)} → ${levelOf(isolation, dedicated)}`,
+        JSON.stringify({ host: h.id, owner: h.owner_login, action: "isolation", from: { isolation: h.isolation, dedicated: h.dedicated === null ? null : !!h.dedicated }, to: { isolation, dedicated: dedicated === null ? null : !!dedicated } }),
+      )
       .run();
   }
   // The host orders it answers (#344): each closes an open order of this host only, once; its line is the pool's words, the

@@ -35,12 +35,29 @@
 //! lease, its /28, the lanes, the release's pinned images, the real engine.
 //! A job of a kind that starts no helper (a sync, a render) has none, and
 //! its every engine call is refused.
+//!
+//! **On a remapped daemon** (#405, #407) a helper's root is the remapped
+//! range's first uid on the host, as a task container's is, and "other" on the
+//! directory its script made (`mktemp -d`: 0700, the dispatcher's root): it
+//! could not even read `/repo/<script>.sh`. The context carries that root
+//! (`task_root`, what the engine told the dispatcher at its start), and before
+//! the helper starts the shim opens its directory to it ([`open_for`]):
+//! mounted read-only, for reading, as a task's `in` is — every directory 0755,
+//! every regular file `a+r`, a link left as it is; mounted read-write, the
+//! directory itself given to that root, as a task's writable directories are
+//! (never opened to every user), and what the script put in it opened for
+//! reading. A run whose directory it cannot open is refused (125) before
+//! its network, its sidecar or the helper is started. Nothing is given back
+//! after: the job reads and removes what its helper wrote as it always did
+//! (root, with docker's default capabilities), and the job's 0700 directory
+//! holds it all. On every other engine there is no task root and nothing
+//! changes.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::engine::{self, Engine as _};
+use super::engine::{self, Engine as _, TaskRoot};
 use super::spec::{self, Gateway, Subnets};
 
 /// Its name on `PATH`, and what `RUNTIME` names.
@@ -178,6 +195,11 @@ pub struct Context {
     pub deny: Vec<String>,
     /// The engine itself: its CLI by absolute path, never this shim.
     pub engine: PathBuf,
+    /// A remapped daemon's task root as the host sees it (#405, [`engine::Cli::remap`]), which a
+    /// helper's root is too: its directory is opened to it before it starts ([`open_for`], #407).
+    /// None on every other engine, and in a context that does not name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_root: Option<TaskRoot>,
 }
 
 /// Checks a read `run` against the job: its lane, its image, its directory.
@@ -217,6 +239,25 @@ pub fn fits(run: &Run, ctx: &Context) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// A helper's directory opened to a remapped daemon's task root `root` (#407), which is "other"
+/// on what the job made. Mounted read-only, it is opened for reading as a task's `in` is
+/// ([`super::kinds::open_input`]): every directory 0755, every regular file `a+r` with its other
+/// bits kept, walked without following a link. Mounted read-write, the directory itself is given
+/// to that root (`lchown`, as a task's [`super::kinds::WRITABLE`] directories are: never opened
+/// to every user, where another uid could plant what the job reads back) and what the script put
+/// in it opened for reading; what the helper writes there is its root's. Nothing outside the
+/// directory changes, and nothing is given back after: the job reads and removes what its helper
+/// wrote, as root, as before. An error names the directory as the helper sees it (`/repo`).
+pub fn open_for(run: &Run, root: TaskRoot) -> std::io::Result<()> {
+    let shown = Path::new("/repo");
+    if run.read_only {
+        return super::kinds::open_readable(&run.dir, shown);
+    }
+    std::os::unix::fs::lchown(&run.dir, Some(root.uid), Some(root.gid))
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", shown.display())))?;
+    super::kinds::open_within(&run.dir, shown)
 }
 
 /// The helper's plan: the job's network and egress sidecar, then its own `run` — on this engine's
@@ -298,6 +339,19 @@ pub fn run_with(context: Option<&Path>, args: &[String]) -> i32 {
         Ok(p) => p,
         Err(why) => return refuse(&why),
     };
+    // On a remapped daemon (#405) the helper's root is "other" on the directory its script made
+    // (#407): opened to it once the run is taken, before anything of it starts, or nothing does.
+    if let Some(root) = ctx.task_root {
+        if let Err(e) = open_for(&run, root) {
+            eprintln!(
+                "{NAME}: {} could not be opened to the remapped task root {}:{}: {e}",
+                run.dir.display(),
+                root.uid,
+                root.gid
+            );
+            return REFUSED;
+        }
+    }
     // What an earlier helper of this job left (a shim killed half-way): the lease's network would be in the way.
     engine.remove_lease(ctx.task, &ctx.gen);
     let ready = engine::ensure_bridge(&engine, &ctx.host).and_then(|()| {
@@ -456,6 +510,7 @@ mod tests {
             slot: 3,
             deny: Vec::new(),
             engine: PathBuf::from("/usr/bin/docker"),
+            task_root: None,
         }
     }
 
@@ -567,6 +622,288 @@ mod tests {
             REFUSED
         );
         assert!(!called.exists(), "no engine call for a refused run");
+    }
+
+    /// An engine that answers the shim's calls as Docker 28 does (#407), each call recorded in
+    /// `calls`; the helper's own `run` lists `look` as it finds them when it starts (`ls -lnd`,
+    /// into `seen`) and exits 7, which the shim must hand back.
+    fn recording_engine(at: &Path, calls: &Path, seen: &Path, look: &[PathBuf]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fake = at.join("engine");
+        let look: Vec<String> = look.iter().map(|p| format!("'{}'", p.display())).collect();
+        std::fs::write(
+            &fake,
+            format!(
+                r#"#!/bin/sh
+echo "$*" >> '{calls}'
+case "$1" in
+  version) echo '{{"Version":"28.0.4","Components":[{{"Name":"Engine"}}]}}' ;;
+  run) case "$*" in *"-helper "*) ls -lnd {look} > '{seen}'; exit 7 ;; esac ;;
+esac
+exit 0
+"#,
+                calls = calls.display(),
+                seen = seen.display(),
+                look = look.join(" "),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    /// What a helper's directory holds as a job's scripts leave it with umask 077 (#407): a
+    /// check's (`mktemp -d`, 0700, its script, a keyring in a directory of its own, each
+    /// owner-only, and a link to an owner-only file outside it) and an export's (its script).
+    struct Scratch {
+        _t: tempfile::TempDir,
+        base: PathBuf,
+        check: PathBuf,
+        export: PathBuf,
+        outside: PathBuf,
+    }
+
+    impl Scratch {
+        fn new() -> Self {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt as _;
+            let t = tempfile::tempdir().unwrap();
+            let base = t.path().canonicalize().unwrap();
+            let (check, export) = (base.join("tmp/tmp.check"), base.join("tmp/tmp.export"));
+            let outside = base.join("outside");
+            for d in [&check.join("keyrings"), &export, &outside] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            for f in [
+                check.join("check.sh"),
+                check.join("keyrings/pool.gpg"),
+                export.join("export.sh"),
+                outside.join("secret"),
+            ] {
+                std::fs::write(&f, "x\n").unwrap();
+                std::fs::set_permissions(&f, Permissions::from_mode(0o600)).unwrap();
+            }
+            std::os::unix::fs::symlink(outside.join("secret"), check.join("secret")).unwrap();
+            for d in [&check, &check.join("keyrings"), &export, &outside] {
+                std::fs::set_permissions(d, Permissions::from_mode(0o700)).unwrap();
+            }
+            Self {
+                _t: t,
+                base,
+                check,
+                export,
+                outside,
+            }
+        }
+
+        /// The shim on this scratch with a context naming `root`, through [`recording_engine`].
+        fn shim(&self, root: Option<TaskRoot>, args: &str) -> i32 {
+            let look = [
+                self.check.clone(),
+                self.check.join("check.sh"),
+                self.check.join("keyrings"),
+                self.check.join("keyrings/pool.gpg"),
+                self.export.clone(),
+                self.export.join("export.sh"),
+            ];
+            let c = Context {
+                engine: recording_engine(&self.base, &self.calls(), &self.seen(), &look),
+                task_root: root,
+                ..ctx(&self.base.join("tmp"))
+            };
+            let file = self.base.join("helper.json");
+            std::fs::write(&file, serde_json::to_vec(&c).unwrap()).unwrap();
+            run_with(Some(&file), &argv(args))
+        }
+
+        fn read_only(&self) -> String {
+            format!(
+                "run --rm --platform linux/amd64 -e KEYRING=archlinux -v {}:/repo:ro {ARCH_BASE} bash /repo/check.sh",
+                self.check.display()
+            )
+        }
+
+        fn writable(&self) -> String {
+            format!(
+                "run --rm --platform linux/amd64 -v {}:/repo {ARCH_BASE} bash /repo/export.sh",
+                self.export.display()
+            )
+        }
+
+        fn calls(&self) -> PathBuf {
+            self.base.join("calls")
+        }
+
+        fn seen(&self) -> PathBuf {
+            self.base.join("seen")
+        }
+
+        /// What the helper found of `p` when it started: its mode as `ls` writes it, and its owner.
+        fn seen_of(&self, p: &Path) -> (String, String) {
+            let seen = std::fs::read_to_string(self.seen()).unwrap();
+            let p = p.display().to_string();
+            let f = seen
+                .lines()
+                .map(|l| l.split_whitespace().collect::<Vec<_>>())
+                .find(|f| f.last() == Some(&p.as_str()))
+                .unwrap_or_else(|| panic!("{p} not in {seen}"));
+            (f[0][..10].to_owned(), format!("{}:{}", f[2], f[3]))
+        }
+    }
+
+    fn mode(p: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::symlink_metadata(p).unwrap().mode() & 0o7777
+    }
+
+    fn owner(p: &Path) -> (u32, u32) {
+        use std::os::unix::fs::MetadataExt as _;
+        let m = std::fs::metadata(p).unwrap();
+        (m.uid(), m.gid())
+    }
+
+    /// #407: on a remapped daemon (a context naming its task root) a helper's directory is opened
+    /// to that root before the helper starts, as the helper finds it then. Mounted read-only:
+    /// every directory 0755, every regular file `a+r` with its other bits kept, its owner kept, a
+    /// link and what it points to outside as they were, and the other directory untouched.
+    /// Mounted read-write: the directory itself given to the root (this process's own uid and
+    /// gid here, a change of owner it may make wherever it runs), its mode kept, what the script
+    /// put in it opened for reading. The helper's exit code comes back, and nothing is given back
+    /// after.
+    #[test]
+    fn on_a_remapped_daemon_a_helpers_directory_is_opened_to_its_root_before_it_starts() {
+        let s = Scratch::new();
+        let me = owner(&s.base);
+        let root = TaskRoot {
+            uid: me.0,
+            gid: me.1,
+        };
+        let me_s = format!("{}:{}", me.0, me.1);
+        assert_eq!(s.shim(Some(root), &s.read_only()), 7);
+        for (p, m) in [
+            (s.check.clone(), "drwxr-xr-x"),
+            (s.check.join("check.sh"), "-rw-r--r--"),
+            (s.check.join("keyrings"), "drwxr-xr-x"),
+            (s.check.join("keyrings/pool.gpg"), "-rw-r--r--"),
+            (s.export.clone(), "drwx------"),
+            (s.export.join("export.sh"), "-rw-------"),
+        ] {
+            assert_eq!(
+                s.seen_of(&p),
+                (m.to_owned(), me_s.clone()),
+                "{}",
+                p.display()
+            );
+        }
+        assert_eq!(
+            (mode(&s.check), mode(&s.check.join("check.sh"))),
+            (0o755, 0o644)
+        );
+        assert!(std::fs::symlink_metadata(s.check.join("secret"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            (mode(&s.outside), mode(&s.outside.join("secret"))),
+            (0o700, 0o600),
+            "what a link points to outside the directory is left as it was"
+        );
+        assert_eq!(s.shim(Some(root), &s.writable()), 7);
+        assert_eq!(
+            s.seen_of(&s.export),
+            ("drwx------".to_owned(), me_s.clone()),
+            "given to the root, its mode kept"
+        );
+        assert_eq!(
+            s.seen_of(&s.export.join("export.sh")),
+            ("-rw-r--r--".to_owned(), me_s)
+        );
+        assert_eq!(
+            (
+                owner(&s.export),
+                mode(&s.export),
+                mode(&s.export.join("export.sh"))
+            ),
+            (me, 0o700, 0o644)
+        );
+        // Both helpers started, each after its network and its egress sidecar.
+        let calls = std::fs::read_to_string(s.calls()).unwrap();
+        assert_eq!(calls.matches("-helper ").count(), 2, "{calls}");
+    }
+
+    /// #407: without a task root (every engine but a remapped daemon, and a context from before
+    /// it) nothing changes mode or owner, whichever way the directory is mounted.
+    #[test]
+    fn without_a_task_root_a_helpers_directory_is_left_as_its_script_made_it() {
+        let s = Scratch::new();
+        assert_eq!(s.shim(None, &s.read_only()), 7);
+        assert_eq!(s.shim(None, &s.writable()), 7);
+        for (p, m) in [
+            (s.check.clone(), 0o700),
+            (s.check.join("check.sh"), 0o600),
+            (s.check.join("keyrings"), 0o700),
+            (s.check.join("keyrings/pool.gpg"), 0o600),
+            (s.export.clone(), 0o700),
+            (s.export.join("export.sh"), 0o600),
+        ] {
+            assert_eq!(mode(&p), m, "{}", p.display());
+        }
+        assert_eq!(owner(&s.export), owner(&s.base));
+    }
+
+    /// #407: a writable directory this process may not give to the root (another uid, as a user)
+    /// is refused (125) once the engine said how it keeps a gateway off the host, before the
+    /// helper's network, its sidecar or the helper is started, and nothing of the directory
+    /// changed; as root it is given.
+    #[test]
+    fn a_directory_that_cannot_be_given_to_the_task_root_starts_nothing() {
+        let s = Scratch::new();
+        let other = TaskRoot {
+            uid: 4242,
+            gid: 4343,
+        };
+        let code = s.shim(Some(other), &s.writable());
+        if rustix::process::geteuid().is_root() {
+            assert_eq!(code, 7);
+            assert_eq!(owner(&s.export), (4242, 4343));
+            return;
+        }
+        assert_eq!(code, REFUSED);
+        let calls = std::fs::read_to_string(s.calls()).unwrap();
+        assert!(
+            calls.lines().all(|l| l.starts_with("version ")),
+            "only the engine's version asked: {calls}"
+        );
+        assert_eq!(
+            (owner(&s.export), mode(&s.export.join("export.sh"))),
+            (owner(&s.base), 0o600)
+        );
+    }
+
+    /// #407: the context names a task root only where there is one; one that names none reads
+    /// as none.
+    #[test]
+    fn a_contexts_task_root_is_written_only_where_there_is_one() {
+        let c = ctx(Path::new("/w/t/tmp"));
+        let plain = serde_json::to_value(&c).unwrap();
+        assert!(plain.get("task_root").is_none(), "{plain}");
+        assert_eq!(
+            serde_json::from_value::<Context>(plain).unwrap().task_root,
+            None
+        );
+        let remapped = Context {
+            task_root: Some(TaskRoot {
+                uid: 165_536,
+                gid: 165_536,
+            }),
+            ..c
+        };
+        let v = serde_json::to_value(&remapped).unwrap();
+        assert_eq!(
+            v["task_root"],
+            serde_json::json!({ "uid": 165_536, "gid": 165_536 })
+        );
+        assert_eq!(serde_json::from_value::<Context>(v).unwrap(), remapped);
     }
 
     #[test]

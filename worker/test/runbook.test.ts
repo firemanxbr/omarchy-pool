@@ -107,6 +107,14 @@ describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
     expect(retired).toContain("a hard precondition of that deploy");
     expect(retired).toContain("So do not deploy while the first two queries list anything.");
   });
+
+  it("gives readopt-failed as a query that counts a task container's loss only, never a pool job's (#319)", () => {
+    expect(studio).toContain("**Whether it lost a task container**");
+    expect(studio).toContain("json_extract(e.payload, '$.lost') = 1");
+    // A task container's loss only (dispatch/mod.rs KINDS): a pool job lost with its dispatcher at a release is by design (#319).
+    expect(studio).toContain("JOIN build_tasks t ON t.id = json_extract(e.payload, '$.task')");
+    expect(studio).toContain("AND t.kind IN ('build', 'trial', 'audit')");
+  });
 });
 
 describe("the runbook's After a release (AC4 of #277)", () => {

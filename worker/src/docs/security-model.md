@@ -186,7 +186,11 @@ a contributor's code where the host has one.
   package's build cache, each directory itself — before the container
   starts, never opening one to every user, and opens `in` for reading
   (directories 0755, files `a+r`, no link followed); the task directory,
-  `tasks/`, `cache/` and `in` stay the dispatcher's. Every task container and
+  `tasks/`, `cache/` and `in` stay the dispatcher's. A pool job's helper
+  (below) runs as that uid too, and `omarchy-task-run` makes its one
+  directory ready for it the same way before it starts (#407): opened for
+  reading when it is mounted read-only, the directory itself given to that
+  uid, what is in it opened for reading, when read-write. Every task container and
   sidecar on that daemon runs in the same remapped range, its root that same
   uid, community and project alike: a root that escapes as that uid reaches
   every other running task's processes (the same uid: ptrace,

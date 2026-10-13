@@ -105,6 +105,10 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
     // narrows, through idx_packages_filename, and the key equality stays
     // the truth. Without it the check scanned the packages table per
     // victim: 34,808 rows read for each of the 3,552 deletes of 2026-09-20.
+    // The same bytes indexed for the other architecture (migration 0055)
+    // are another row naming another object, in its own `<arch>/`
+    // directory: its object, its lists and its row stay — the key decides
+    // what is shared, never the sha256.
     const shared = await env.DB.prepare(
       "SELECT COUNT(*) AS n FROM packages WHERE filename = ?1 AND id != ?2 AND COALESCE(r2_key, repo_arch || '/' || filename) = ?3",
     ).bind(p.filename, p.id, p.r2_key).first<{ n: number }>();

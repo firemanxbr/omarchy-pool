@@ -14,7 +14,7 @@
  *   pool/factory/<arch>/<filename>.provenance.json(.sig) the attestation, factory builds
  */
 import { json, type Env } from "../index";
-import { version } from "../meta";
+import { isRepoArch, version } from "../meta";
 import { detachedSignature, publicKey, signingEnabled } from "../signing";
 
 const REPO_URL = "https://github.com/firemanxbr/omarchy-pool";
@@ -146,11 +146,23 @@ export async function factoryChain(env: Env, sha256: string): Promise<Record<str
   };
 }
 
+/**
+ * The row a seal or an attestation is about: these bytes as `repoArch`'s
+ * repository holds them, or — no architecture asked — the first in the
+ * index's order (aarch64's before x86_64's). The same bytes can be indexed
+ * for both architectures (migration 0055), each row naming its own object,
+ * signature and upstream. Either form reads one row of
+ * idx_packages_sha256_repo_arch (an ORDER BY id would sort the range).
+ */
+const SEALED_COLUMNS = "id, sha256, name, version, arch, repo_arch, filename, source, has_signature, created_at, COALESCE(r2_key, source || '/' || repo_arch || '/' || filename) AS r2_key";
+export const SEALED_ROW_SQL = `SELECT ${SEALED_COLUMNS} FROM packages WHERE sha256 = ?1 AND repo_arch = ?2`;
+export const SEALED_FIRST_SQL = `SELECT ${SEALED_COLUMNS} FROM packages WHERE sha256 = ?1 ORDER BY repo_arch LIMIT 1`;
+const sealedRow = (env: Env, sha256: string, repoArch: string | null) =>
+  (repoArch === null ? env.DB.prepare(SEALED_FIRST_SQL).bind(sha256) : env.DB.prepare(SEALED_ROW_SQL).bind(sha256, repoArch));
+
 /** The seal of any object the pool stores. */
-export async function sealOf(env: Env, sha256: string): Promise<Record<string, unknown> | null> {
-  const p = await env.DB.prepare("SELECT id, sha256, name, version, arch, repo_arch, filename, source, has_signature, created_at, COALESCE(r2_key, source || '/' || repo_arch || '/' || filename) AS r2_key FROM packages WHERE sha256 = ? ORDER BY id LIMIT 1")
-    .bind(sha256)
-    .first<PackageRow>();
+export async function sealOf(env: Env, sha256: string, repoArch: string | null = null): Promise<Record<string, unknown> | null> {
+  const p = await sealedRow(env, sha256, repoArch).first<PackageRow>();
   if (!p) return null;
   const key = await publicKey(env);
   const base = { sha256: p.sha256, name: p.name, version: p.version, arch: p.arch, repo_arch: p.repo_arch, filename: p.filename, source: p.source, indexed_at: p.created_at, object: `${env.POOL_URL}/${p.r2_key}` };
@@ -189,8 +201,9 @@ export async function sealOf(env: Env, sha256: string): Promise<Record<string, u
  * signature of it when the pool signs. Called once, when the project's
  * build completes; a rerun overwrites with the same facts.
  */
-export async function writeAttestation(env: Env, sha256: string): Promise<boolean> {
-  const p = await env.DB.prepare("SELECT filename, COALESCE(r2_key, source || '/' || repo_arch || '/' || filename) AS r2_key FROM packages WHERE sha256 = ? ORDER BY id LIMIT 1").bind(sha256).first<{ filename: string; r2_key: string }>();
+export async function writeAttestation(env: Env, sha256: string, repoArch: string | null = null): Promise<boolean> {
+  // Beside the object of the build's architecture; the first row's when the bytes are indexed for the other one only.
+  const p = (await sealedRow(env, sha256, repoArch).first<{ filename: string; r2_key: string }>()) ?? (repoArch === null ? null : await sealedRow(env, sha256, null).first<{ filename: string; r2_key: string }>());
   const chain = await factoryChain(env, sha256);
   if (!p || !chain) return false;
   const statement = {
@@ -209,8 +222,11 @@ export async function writeAttestation(env: Env, sha256: string): Promise<boolea
   return true;
 }
 
-export async function handleProvenance(sha256: string, env: Env): Promise<Response> {
-  const seal = await sealOf(env, sha256);
+export async function handleProvenance(sha256: string, url: URL, env: Env): Promise<Response> {
+  // `?arch=`: the object of these bytes in that architecture's repository (both can hold the same bytes, 0055).
+  const arch = url.searchParams.get("arch");
+  if (arch !== null && !isRepoArch(arch)) return json({ error: "arch must be x86_64 or aarch64" }, 400);
+  const seal = await sealOf(env, sha256, arch);
   if (!seal) return json({ error: "no seal for this object" }, 404);
   return json(seal, 200, { "cache-control": "public, max-age=60" });
 }

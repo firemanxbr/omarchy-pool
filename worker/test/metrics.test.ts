@@ -14,7 +14,7 @@ import { anyTwice, snapshotMetrics } from "../src/metrics";
 describe("any packages stored once per architecture", () => {
   it("counts the names, the objects and the second copies' bytes", async () => {
     await env.DB.batch([
-      env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES
+      env.DB.prepare(`INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES
         ('1', 'fonts', '1-1', 'any', 'fonts-1-1-any.pkg.tar.zst', 100, 1, 0, '{}', 'extra', 'extra/x86_64/fonts', 'x86_64'),
         ('2', 'fonts', '1-1', 'any', 'fonts-1-1-any.pkg.tar.zst', 120, 1, 0, '{}', 'alarm', 'alarm/aarch64/fonts', 'aarch64'),
         ('3', 'docs', '2-1', 'any', 'docs-2-1-any.pkg.tar.zst', 50, 1, 0, '{}', 'extra', 'extra/x86_64/docs', 'x86_64'),
@@ -34,7 +34,7 @@ describe("what the snapshot reads", () => {
   it("rescans the pool only after something changed it", async () => {
     // A first snapshot scans; half an hour later nothing moved: the pool
     // block is the previous one, carried over. A sync, and the next one scans.
-    await env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES
+    await env.DB.prepare(`INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES
       ('9', 'nano', '8-1', 'x86_64', 'nano-8-1-x86_64.pkg.tar.zst', 700, 1, 0, '{}', 'extra', 'extra/x86_64/nano', 'x86_64')`).run();
     // The rows' created_at is the database's clock, so the moments are real
     // ones — half an hour after the previous test's snapshot.
@@ -63,7 +63,7 @@ describe("what the snapshot reads", () => {
     expect(later).toContain(`${first.jobs.runs + 1} jobs in 7 days`);
 
     await synced(at(1).toISOString());
-    await env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES
+    await env.DB.prepare(`INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES
       ('10', 'nano', '8-2', 'x86_64', 'nano-8-2-x86_64.pkg.tar.zst', 710, 1, 0, '{}', 'extra', 'extra/x86_64/nano2', 'x86_64')`).run();
     await snapshotMetrics(env, at(93));
     const third = JSON.parse((await env.DB.prepare("SELECT payload FROM events WHERE kind = 'metrics' ORDER BY id DESC LIMIT 1").first<{ payload: string }>())!.payload);

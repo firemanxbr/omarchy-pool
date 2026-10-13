@@ -863,7 +863,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
     return handleGetPackage(m[1], env);
   }
   if ((m = path.match(/^\/packages\/([0-9a-f]{64})\/provenance$/)) && method === "GET") {
-    return handleProvenance(m[1], env);
+    return handleProvenance(m[1], url, env);
   }
   if (path === "/releases" && method === "POST") {
     return (await authorizeRelease(request, env)) ?? handleCreateRelease(request, env);

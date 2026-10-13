@@ -151,7 +151,7 @@ const record = async (url: string) => {
 };
 /** A package a ring serves: an object of it, a member of edge. */
 const serve = async (name: string) => {
-  const id = (await env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, manifest_json, source) VALUES (?, ?, '1.0-1', 'x86_64', ?, 1, 1, '{}', 'factory') RETURNING id")
+  const id = (await env.DB.prepare("INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, manifest_json, source) VALUES (?, ?, '1.0-1', 'x86_64', ?, 1, 1, '{}', 'factory') RETURNING id")
     .bind(await sha256Hex(`factory/${name}`), name, `${name}-1.0-1-x86_64.pkg.tar.zst`).first<{ id: number }>())!.id;
   await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?)").bind(id).run();
 };

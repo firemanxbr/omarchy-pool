@@ -295,8 +295,10 @@ jobs:
     # while its task container and egress sidecar stay remapped: built as the builder,
     # uploaded and completed; the probe reads the keys as 65533:65533, and a draft's agent
     # sidecar runs remapped as that uid, writes its usage where the dispatcher gave it, and
-    # completes; the ACL lost holds the model kinds (keys-acl); and the dispatcher's
-    # real-engine tests on that engine.
+    # completes; a pool job's health check runs its helpers through omarchy-task-run as that
+    # remapped root, the directories its script made with mktemp -d opened to it first (#407);
+    # the ACL lost holds the model kinds (keys-acl); and the dispatcher's real-engine tests on
+    # that engine.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -316,7 +318,7 @@ jobs:
           docker info --format '{{json .SecurityOptions}}' | grep -q name=userns || { sudo journalctl -u docker --no-pager -n 60; exit 1; }
           docker info --format 'docker {{.ServerVersion}}, {{.Driver}}, {{.DockerRootDir}}'
           grep -H '^dockremap:' /etc/subuid /etc/subgid
-      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — and its model kinds, the keys read through their ACL by the sidecars' remapped uid alone
+      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — its model kinds, the keys read through their ACL by the sidecars' remapped uid alone, and a pool job's helpers through omarchy-task-run
         run: bash tests/userns-remap.sh
 
   host-key-tpm:

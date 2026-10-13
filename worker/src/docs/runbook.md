@@ -173,6 +173,11 @@ A release is `main` at the moment a maintainer dispatches one
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
    `wrangler d1 execute` (the release holds no credential of the pool's API).
+   A deploy that fails after the migration step is rolled forward —
+   **Re-run failed jobs** — never left: once a migration that marks itself
+   `-- rollback-floor` is applied (0055, #421), the Worker still running
+   cannot index anything (every `POST /packages` fails), and a rollback below
+   it is refused.
 7. Every host follows: its agent reads the new release from its host
    state within minutes, verifies the bundle and rolls it out, a task
    running across it (*The run loop*, below; a host whose owner set a soak
@@ -228,10 +233,17 @@ after it and once more once it runs; a task's stop fence goes too. A
 worker's drain stays, but the older Worker does not honour it: drained
 workers take work until the roll-forward, which declares everything else
 again at each worker's first claim (security model, *A Worker rolled back
-past #277*; #295). Migrations are forward-only; keep them additive. The
-fallback, by hand, for the Worker alone: re-run the Deploy job of that
-release's run, or `git checkout vX.Y.Z && cd worker && npx wrangler deploy
---var POOL_VERSION:vX.Y.Z`.
+past #277*; #295). Migrations are forward-only; keep them additive. One that
+cannot be — an earlier Worker cannot run on what it leaves — marks itself
+with a line `-- rollback-floor: <why>` and is a floor: once the newest
+release carries it, the rollback refuses every release without that file
+before anything moves, and only a roll forward helps (re-run the newest
+release's deploy, or release a fix). The first is
+`0055_one_row_per_arch.sql` (#421): it renamed `packages.sha256`, so a
+Worker from before it fails every index. The fallback, by hand, for the
+Worker alone: re-run the Deploy job of that release's run, or `git checkout
+vX.Y.Z && cd worker && npx wrangler deploy --var POOL_VERSION:vX.Y.Z` —
+never below the floor.
 
 ## The GitHub settings the signature relies on
 
@@ -1095,7 +1107,13 @@ host`) asks the engine for that uid and gid when it starts — its log says
 `pkgcache` directories and its package's build cache to it, and opens its
 `in` for reading (directories 0755, files `a+r`: a trial an older release's
 `tests/trial.sh` staged leaves it 0700), before the container starts, or
-hands the lease back `lost` with why (#405). A dispatcher the daemon
+hands the lease back `lost` with why (#405). A pool job's helpers (a health
+check's, an ABI gate's reference and export, the enqueue's reader of the
+recipes) run as that root too, from a directory their script made with
+`mktemp -d` (0700, root's): `omarchy-task-run` opens it to that root before
+the helper starts — for reading when it is mounted read-only, given to it
+when read-write — or refuses the run (125) and says why on its standard
+error, which a health check's event carries in its tail (#407). A dispatcher the daemon
 remapped too (a set without the overlay's `userns_mode: host`: its root is
 the task's) refuses to start and says so; one on a host that is a user
 namespace itself (an unprivileged LXC or Incus container running dockerd
@@ -2741,11 +2759,14 @@ names its host, linked to its page; errors come first.
   Reconcile now runs a round at once.
 - **`rolled-back`**: its guard reverted a release (*A host reverted a
   release*); the six hours on its last-good have a line of their own.
-- **`readopt-failed`**: a task was lost on the host in the last hour —
-  its container gone when its dispatcher came back (a reboot, an engine
-  restart, the disk watcher). Each is back in the queue with its attempt
-  given back, at most twice per task; more than one host at once points at
-  the release.
+- **`readopt-failed`**: a task container — a build (a draft, a bump, a
+  review rebuild), a trial or an audit — was lost on the host in the last
+  hour: its container gone when its dispatcher came back (a reboot, an
+  engine restart, the disk watcher). Each is back in the queue with its
+  attempt given back, at most twice per task; more than one host at once
+  points at the release. A pool job lost is not one: it runs in the
+  dispatcher's own process tree and ends with it at every release or
+  restart by design, an info line (below).
 - **`disk-low`**: the free disk on its work root or its engine's data root
   is under the signed floor (`capacity.disk.floor_gb`): its dispatcher
   claims no build until there is room. Prune the engine, or grow the disk.
@@ -2793,8 +2814,13 @@ names its host, linked to its page; errors come first.
   share asks for a different model on one host (another provider's key, or
   `FACTORY_PROVIDER` / `FACTORY_MODEL` in that host's `agent.env`; *How the
   pool hands a host work*).
-- **Info**: a host confirmed this week, and an agent's self-rollback (the
-  version it skips until a higher one; *Self-update*).
+- **Info**: a host confirmed this week, an agent's self-rollback (the
+  version it skips until a higher one; *Self-update*), and the pool jobs a
+  host lost in the last hour — ended with their dispatcher at a release or
+  a restart, or handed back before they started (a lane of a ring's
+  architecture or a task network missing, or more units than its claim
+  offered) — each back in the queue with its attempt given back; the
+  journal's line of each names its kind.
 
 The host's own page has the same facts for its owner and the maintainers,
 with a **Needs a person** box: the owner's Confirm, a suspension, the
@@ -2802,7 +2828,13 @@ maintainer list's stop, below the minimum, the disk under the floor, a lane
 held for binfmt, limits the runtime does not enforce (a rootless runtime
 needs systemd to delegate cpu, memory and pids to the agent's user), the
 hosting requirement its isolation level does not meet as a new host would
-(`root` is the Studio's recorded exception until P6), the engine refusing
+(`root` is the Studio's recorded exception until P6; the level is the one
+its agent's last report says, from `run/capacity.json`, which the running
+agent does not count again: after the daemon moves to userns-remap, the
+install run again, or `omarchy-agent capacity --write` at the host,
+rewrites that file with `subuid`, and the item goes with the next report;
+the way back the same with `root` brings it back; the journal has a line
+for each change, #407), the engine refusing
 the agent's user (log out and back in, or reboot, so the docker group
 applies), and what the agent says of itself in its report's
 `needs_person` (from agent 0.5.0, looked at again hourly: linger off —
@@ -2900,6 +2932,16 @@ omarchy-agent status                                      # the round, the relea
 omarchy-agent logs                                        # the agent's journal
 docker ps --filter label=org.omarchy-pool.agent.host      # the dispatcher and the tasks' containers
 systemctl --user status omarchy-agent                     # the unit, after a reboot (linger keeps it up with nobody logged in)
+```
+
+**Whether it lost a task container** over the last week — what Status's
+`readopt-failed` counts (*What Status says of the hosts*, above), and the
+canary's first exit criterion (#319) — is a query from anywhere (`<reg>`:
+its registration, on its page), empty when it lost none:
+
+```bash
+# no readopt-failed: no task container lost on it (a container gone when its dispatcher came back) — a pool job lost with its dispatcher at a release is by design, not counted
+npx wrangler d1 execute omarchy-repo --remote --command "SELECT e.created_at, t.kind, e.summary FROM events e JOIN build_tasks t ON t.id = json_extract(e.payload, '$.task') WHERE e.kind = 'build' AND json_extract(e.payload, '$.worker') = '<reg>' AND json_extract(e.payload, '$.lost') = 1 AND t.kind IN ('build', 'trial', 'audit') AND e.created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
 ```
 
 A task that hangs is stopped from the site (**Stop** on its lease, or *Stop
@@ -3466,11 +3508,29 @@ rebuilds them), and the job remembered what the pool stores by filename
 alone — so a ring's x86_64 re-pin carried the aarch64 bytes. It now keeps
 one entry per `<arch>/<filename>` of the OPR's directory, and a re-pin happens exactly when the
 ring's pin differs from what that directory stores, whatever the
-signature's story was. The index holds one row per sha256 (0001_init.sql):
-the same bytes stored under both directories can be indexed for one of
-them, and the other directory's pin is reported rather than forced
-(`POST /packages` answers 409, not a database error). The second attempt
-re-pinned the 5 objects (rc#18, stable#8) and every OPR object verified.
+signature's story was. The second attempt re-pinned the 5 objects (rc#18,
+stable#8) and every OPR object verified.
+
+Until #421 the index held one row per sha256 (0001_init.sql): the same
+bytes stored under both directories could be indexed for one of them only,
+and `POST /packages` answered 409 for the other. The sync hit that limit
+too: Omarchy ships some `any` archives byte for byte in both architectures'
+repositories, and from at least 2026-10-12 every x86_64 sync of `packages`
+reported `0 new, 8 failed` (*these bytes are indexed for aarch64*), eight
+packages left out of x86_64's rings, the aarch64 sync `2 failed` the other
+way. Since migration 0055 the index holds one row per (sha256, repository
+architecture): each architecture's sync, publish and re-pin indexes the
+bytes for its own directory — a row, an object, lists and ring membership
+of its own — and the pin is made rather than reported. What reads by
+sha256 reads the row of the architecture it is about (`known`, a sync's or
+a re-pin's release, the seal with `?arch=`) or every row of the bytes (an
+unscoped release add, the security matches); GC takes a row and the object
+its own key names, so the other architecture's row, object and lists stay.
+After the release that ships it, the next sync of `packages` on each
+architecture reports `0 failed`: the objects the 409 left without a row are
+already in the pool under their architecture's directory (their upload went
+through every run; all ten answered 200 on 2026-10-12), so it indexes them
+and pins them.
 
 ## The factory
 

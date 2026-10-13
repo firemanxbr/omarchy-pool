@@ -17,8 +17,9 @@
 # Worker from #277 withholds but a person's drain, run here against a
 # database built from the migrations (#295). A `to` that is not a release tag of the
 # repository, a release whose images did not pass both smoke starts, a
-# Worker that does not install or build, or a missing deploy token, moves
-# nothing.
+# Worker that does not install or build, a missing deploy token, or a
+# release below the schema floor (a migration marked `-- rollback-floor`,
+# 0055 the first, #421, that the newest release carries) moves nothing.
 #
 # The rollback statement (#314), end to end with a stubbed signer: written
 # and signed (`cosign sign-blob --bundle`, the stub writes a bundle naming
@@ -312,4 +313,34 @@ grep -q "did not install (npm ci): nothing moved" <<<"$out" && ! grep -qE 'image
 if out="$(cd "$tmp/repo" && CLOUDFLARE_API_TOKEN= "$R" v1.0.2 2>&1)"; then fail "no deploy token must be refused: $out"; fi
 grep -q "the Worker has to go back with the images" <<<"$out" && ! grep -q 'imagetools create' "$STUB_LOG" || fail "without the token, nothing moves: $out"
 echo "ok: refused before anything moves"
+
+# The schema floor (#421): a migration that marks itself `-- rollback-floor` is one no Worker before it can run on (0055 renamed
+# packages.sha256: an older Worker's every index fails). Once the newest release carries it — its deploy applied it, or applied it
+# and then failed — a target without the file is refused before anything is asked or moved; on main but in no release yet (the
+# database does not hold it), it refuses nothing; a release that carries it is a target like any other.
+grep -q '^-- rollback-floor' "$root/worker/migrations/0055_one_row_per_arch.sql" || fail "migration 0055 marks itself a floor: no Worker before it can write packages"
+(
+  cd "$tmp/repo"
+  mkdir -p worker/migrations
+  printf -- '-- additive\nCREATE TABLE a (x);\n' > worker/migrations/0001_a.sql
+  printf -- '-- not additive\n-- rollback-floor: a Worker before it cannot write a\nALTER TABLE a RENAME COLUMN x TO y;\n' > worker/migrations/0055_one_row_per_arch.sql
+  git add -A; git commit -qm "the floor"
+)
+echo v1.0.3 > "$STUB_VERSION"; : > "$STUB_LOG"
+out="$(cd "$tmp/repo" && "$R" v1.0.2 2>&1)" || fail "a floor merged but in no release yet refuses nothing: $out"
+grep -q "running v1.0.2" <<<"$out" || fail "and the rollback is done: $out"
+(cd "$tmp/repo" && git tag v10.0.0)
+for to in v1.0.2 v1.0.1; do
+  echo v10.0.0 > "$STUB_VERSION"; : > "$STUB_LOG"
+  if out="$(cd "$tmp/repo" && "$R" "$to" 2>&1)"; then fail "$to, without the floor v10.0.0 carries, must be refused: $out"; fi
+  grep -q "$to is older than 0055_one_row_per_arch.sql, a migration v10.0.0 carries and no earlier Worker can run on" <<<"$out" \
+    && grep -q "only a roll forward helps — re-run v10.0.0's deploy, or release a fix; nothing moved" <<<"$out" || fail "$to: and says so: $out"
+  [[ ! -s "$STUB_LOG" ]] || fail "$to: refused before anything is asked or moved: $(cat "$STUB_LOG")"
+  [[ "$(cat "$STUB_VERSION")" == v10.0.0 ]] || fail "$to: the pool still runs its release"
+done
+(cd "$tmp/repo" && git commit -q --allow-empty -m "after the floor" && git tag v10.0.1)
+echo v10.0.1 > "$STUB_VERSION"; : > "$STUB_LOG"
+out="$(cd "$tmp/repo" && "$R" v10.0.0 2>&1)" || fail "a release that carries the floor is a target like any other: $out"
+grep -q "running v10.0.0" <<<"$out" || fail "and the rollback is done: $out"
+echo "ok: a release below the schema floor is refused once the newest release carries it, and only then"
 echo "ROLLBACK WORKFLOW OK"

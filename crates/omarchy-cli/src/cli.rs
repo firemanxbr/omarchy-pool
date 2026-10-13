@@ -486,7 +486,9 @@ pub fn info_value(config: &Config, api: &Api, package: &str) -> Result<serde_jso
         config.package_url(p.source.as_deref().unwrap_or("packages"), &m.filename),
     );
     // The seal is worth a second request; a pool without it is still a pool.
-    v["seal"] = api.provenance(&m.sha256).unwrap_or(serde_json::Value::Null);
+    v["seal"] = api
+        .provenance(&m.sha256, &config.arch)
+        .unwrap_or(serde_json::Value::Null);
     Ok(v)
 }
 
@@ -543,7 +545,9 @@ fn provenance(
             }
             continue;
         };
-        let seal = api.provenance(&m.sha256).unwrap_or(serde_json::Value::Null);
+        let seal = api
+            .provenance(&m.sha256, &config.arch)
+            .unwrap_or(serde_json::Value::Null);
         if json {
             out.push(serde_json::json!({ "name": name, "version": m.version, "seal": seal }));
         } else if let Some(line) = seal_line(&seal) {
@@ -607,7 +611,12 @@ fn info(config: &Config, api: &Api, package: &str, json: bool) -> Result<i32> {
         "Mirror       : {}",
         config.package_url(p.source.as_deref().unwrap_or("packages"), &m.filename)
     );
-    if let Some(line) = api.provenance(&m.sha256).ok().as_ref().and_then(seal_line) {
+    if let Some(line) = api
+        .provenance(&m.sha256, &config.arch)
+        .ok()
+        .as_ref()
+        .and_then(seal_line)
+    {
         println!("Provenance   : {line}");
     }
     Ok(0)

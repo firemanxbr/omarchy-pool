@@ -1813,7 +1813,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
       await reclaimStagingPackages(env, [built, from?.review ?? null]);
       if (res.sha256) {
         try {
-          await writeAttestation(env, res.sha256);
+          await writeAttestation(env, res.sha256, p.arch ?? task.arch);
         } catch (e) {
           await event(env, "build", "warn", `${task.name}: attestation not written — ${String(e)}`, { task: built, sha256: res.sha256 });
         }
@@ -1951,7 +1951,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   let attested = false;
   if (task.publish !== 0) {
     try {
-      attested = await writeAttestation(env, indexed.sha256);
+      attested = await writeAttestation(env, indexed.sha256, task.arch);
     } catch (e) {
       await event(env, "build", "warn", `${task.name}: attestation not written — ${String(e)}`, { task: id, sha256: indexed.sha256 });
     }
@@ -2064,7 +2064,8 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const attempts = needsNative || lost ? task.attempts - 1 : task.attempts;
   const refused = nativeRefused ? ` (its needs_native refused: it ran on ${task.lane === "native" ? "the native lane" : "a native worker"})` : "";
   const tale = lost ? ` lost on ${who} (a host event, ${task.host_losses + 1} of ${HOST_LOSSES_MAX}) — back in the queue, the attempt given back` : needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${refused4k ? " (its lane is on 4K pages: no emulated lane takes it again)" : ""}${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${refused}${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
-  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(refused4k ? { refused_4k: true } : {}), ...(nativeRefused ? { needs_native_refused: true, lane: task.lane } : {}), ...(hostLease ? { lost: b.lost === true, oom } : {}) });
+  // The task's kind on the line: Status tells a task container lost (readopt-failed) from a pool job lost with its dispatcher (fleet.ts).
+  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, kind: task.kind, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative, ...(refused4k ? { refused_4k: true } : {}), ...(nativeRefused ? { needs_native_refused: true, lane: task.lane } : {}), ...(hostLease ? { lost: b.lost === true, oom } : {}) });
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
 }
 

@@ -44,7 +44,7 @@ describe("OPR provenance", () => {
 
   it("counts a ring's OPR packages by origin", async () => {
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('1', 'omarchy', '1', 'x86_64', 'a', 1, 1, 0, '{}', 'packages', 'k1', 'x86_64'), ('2', 'claude-code', '1', 'x86_64', 'b', 1, 1, 0, '{}', 'packages', 'k2', 'x86_64'), ('3', 'zlib', '1', 'x86_64', 'c', 1, 1, 0, '{}', 'core', 'k3', 'x86_64'), ('4', 'mystery', '1', 'x86_64', 'd', 1, 1, 0, '{}', 'packages', 'k4', 'x86_64')"),
+      env.DB.prepare("INSERT INTO packages (row_key, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('1', 'omarchy', '1', 'x86_64', 'a', 1, 1, 0, '{}', 'packages', 'k1', 'x86_64'), ('2', 'claude-code', '1', 'x86_64', 'b', 1, 1, 0, '{}', 'packages', 'k2', 'x86_64'), ('3', 'zlib', '1', 'x86_64', 'c', 1, 1, 0, '{}', 'core', 'k3', 'x86_64'), ('4', 'mystery', '1', 'x86_64', 'd', 1, 1, 0, '{}', 'packages', 'k4', 'x86_64')"),
       env.DB.prepare("INSERT INTO ring_packages (ring, package_id) SELECT 'stable', id FROM packages"),
     ]);
     await syncProvenance(env, new Date("2026-09-16T06:00:00Z"), github({ "pkgbuilds/omarchy/PKGBUILD": "b1", "pkgbuilds/omarchy/.omarchy/package.json": "m1", "pkgbuilds/claude-code/PKGBUILD": "b2", "pkgbuilds/claude-code/.omarchy/package.json": "m2" }, { omarchy: { source: "local" }, "claude-code": { source: "aur" } }));
