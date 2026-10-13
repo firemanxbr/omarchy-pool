@@ -60,8 +60,13 @@ log_chunk() { [[ -s "$WORKER_LOG" ]] || { echo ""; return 0; }; tail -c 4096 "$W
 # of the environment every child inherits. `export -n` keeps them as shell
 # variables for api() and agent_label(); with_secrets lends the agent's
 # key and GitHub's — never the worker's token — to the one process that
-# needs them (the agent, the drafter), exported inside a subshell so they
-# never show in an argv either. Nothing else sees them: not makepkg, not
+# needs them (the agent, the drafter, the auditor), exported inside a subshell so they
+# never show in an argv either. In a task container (--task) the key is the
+# agent sidecar's placeholder, and it is held and lent the same way: a model
+# tool run without with_secrets sees FACTORY_PROVIDER=anthropic and no key,
+# and stops (every audit on a host did, task 1627, #319; pkg-repo's spec test
+# an_audit_reaches_its_model_through_the_agent_sidecar_as_a_draft_does
+# holds every model tool here to it). Nothing else sees them: not makepkg, not
 # the PKGBUILD it sources for --printsrcinfo, updpkgsums and namcap, not
 # the upstream's build system — a build is somebody else's code, and its
 # log is public (worker/src/leak.ts checks it anyway).
@@ -1027,7 +1032,9 @@ task_run() {
       command -v python3 >/dev/null || pacman -Sy --noconfirm --needed python >/dev/null
       [[ -f "$from/PKGINFO" ]] && args+=(--pkginfo "$from/PKGINFO")
       [[ -f "$from/tests.log" ]] && args+=(--tests "$from/tests.log")
-      python3 "$FACTORY_LIB/bin/audit-pkgbuild" --pkgbuild "$from/PKGBUILD" --log "$from/build.log" --out /task/out "${args[@]}"
+      # The auditor reaches the model as the drafter does, through the agent sidecar: with_secrets
+      # lends it the key hold_secrets keeps from every child (here the sidecar's placeholder).
+      with_secrets python3 "$FACTORY_LIB/bin/audit-pkgbuild" --pkgbuild "$from/PKGBUILD" --log "$from/build.log" --out /task/out "${args[@]}"
       ;;
     trial)
       # The helper: a real pacman installs the lab's build from its public URL (tests/trial.sh staged the check), no token.

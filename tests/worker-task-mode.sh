@@ -6,14 +6,20 @@
 # network: a trial's helper that passes and one that fails, the log cut at its
 # cap with a marker while the task's own status survives the cut (no SIGPIPE),
 # a kind the release does not know, and a verdict whose error carries quotes
-# and backslashes — `verdict.json` must stay JSON. A build's own path is the
-# P1 host's run (it installs from the network).
+# and backslashes — `verdict.json` must stay JSON. And an audit (#319), in
+# PY_IMAGE with a fake agent sidecar: the auditor reaches it with the task's
+# environment as the dispatcher gives it (the placeholder as its key), as a
+# draft does — not "FACTORY_PROVIDER=anthropic but ANTHROPIC_API_KEY is not
+# set", which every audit on a host stopped on (task 1627). A build's own
+# path is the P1 host's run (it installs from the network).
 #
-# Requires: docker or podman, jq. STUB_IMAGE: an image with bash and coreutils (default debian:stable-slim).
+# Requires: docker or podman, jq. STUB_IMAGE: an image with bash and coreutils (default debian:stable-slim);
+# PY_IMAGE: one with python3 too (default python:3.12-slim).
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RT="${RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman)}"
 STUB_IMAGE="${STUB_IMAGE:-docker.io/library/debian:stable-slim}"
+PY_IMAGE="${PY_IMAGE:-docker.io/library/python:3.12-slim}"
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp" 2>/dev/null || "$RT" run --rm -v "$tmp:$tmp" "$STUB_IMAGE" sh -c "rm -rf $tmp/t*" >/dev/null 2>&1; rm -rf "$tmp" 2>/dev/null || true' EXIT
 fail() { echo "worker-task-mode: FAIL — $*" >&2; exit 1; }
@@ -87,6 +93,44 @@ grep -qx 'TRIAL=ok' "$t/log/task.log" || fail "the task after the wait: $(cat "$
 late '' AGENT_READY_S=2
 [[ "$status" == 0 ]] && grep -q 'did not answer in 2 s; going on' "$t/log/task.log" || fail "an agent that never answers: $status $(cat "$t/log/task.log")"
 echo "ok: a model task waits for its agent sidecar's port, bounded, before its first call"
+
+# An audit (#319): the staged build's recipe and log in /task/in/artifacts/<task>, a fake agent sidecar on
+# 127.0.0.1:8790 that keeps what each call carried, and the model environment the dispatcher gives every model kind
+# (crates/pkg-repo/src/dispatch/spec.rs, env_of). The script holds ANTHROPIC_API_KEY back from its children; the
+# auditor must get it back as the drafter does (with_secrets), or agent.py stops before any call.
+"$RT" image inspect "$PY_IMAGE" >/dev/null 2>&1 || "$RT" pull -q "$PY_IMAGE" >/dev/null
+runs=$((runs + 1)); t="$tmp/t$runs"
+mkdir -p "$t/in/artifacts/40" "$t/out" "$t/log"
+printf "staged=1\nkind='audit'\nname='felix'\narch='x86_64'\nstaged_task='40'\n" > "$t/in/meta.sh"
+printf 'pkgname=felix\npkgver=1.0\npkgrel=1\narch=(any)\nlicense=(MIT)\npackage() { :; }\n' > "$t/in/artifacts/40/PKGBUILD"
+printf '==> Making package: felix 1.0-1\n==> Finished making: felix 1.0-1\n' > "$t/in/artifacts/40/build.log"
+cat > "$t/in/fake-agent.py" <<'PY'
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length") or 0))
+        with open("/task/log/agent-seen.jsonl", "a") as f:
+            f.write(json.dumps({"path": self.path, "key": self.headers.get("x-api-key")}) + "\n")
+        report = {"verdict": "ok", "summary": "a fake review", "findings": []}
+        out = json.dumps({"model": "fake-model", "content": [{"type": "text", "text": json.dumps(report)}], "usage": {}}).encode()
+        self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(out))); self.end_headers(); self.wfile.write(out)
+HTTPServer(("127.0.0.1", 8790), H).serve_forever()
+PY
+status=0
+"$RT" run --rm --cap-drop ALL "${caps[@]}" --security-opt no-new-privileges \
+  -e FACTORY_PROVIDER=anthropic -e ANTHROPIC_BASE_URL=http://127.0.0.1:8790 -e ANTHROPIC_API_KEY=via-agent-sidecar \
+  -e GITHUB_API=http://127.0.0.1:8790/github -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1 \
+  -v "$t/in:/task/in:ro" -v "$t/out:/task/out" -v "$t/log:/task/log" -v "$root:/pool:ro" \
+  "$PY_IMAGE" bash -c 'printf "[options]\n" > /etc/pacman.conf; python3 /task/in/fake-agent.py & exec bash /pool/factory/worker/omarchy-build-worker.sh --task' >/dev/null 2>&1 || status=$?
+[[ "$status" == 0 ]] || fail "an audit exited $status: $(cat "$t/log/task.log")"
+jq -e '.verdict == "ok" and .model == "fake-model"' "$t/out/audit.json" >/dev/null || fail "the audit's report: $(cat "$t/out/audit.json" 2>/dev/null)"
+[[ -s "$t/out/audit.md" ]] || fail "no audit.md"
+jq -se 'length >= 1 and all(.path == "/v1/messages" and .key == "via-agent-sidecar")' "$t/log/agent-seen.jsonl" >/dev/null \
+  || fail "the auditor's calls to its agent sidecar: $(cat "$t/log/agent-seen.jsonl" 2>/dev/null)"
+! grep -q via-agent-sidecar "$t/log/task.log" || fail "the key's placeholder is in the task's log"
+echo "ok: an audit reaches its agent sidecar with the placeholder as its key, as a draft does, and writes audit.json and audit.md"
 
 # A kind this release's script does not know.
 run nonsense 'true'
