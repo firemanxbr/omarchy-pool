@@ -1385,7 +1385,7 @@ mod tests {
             ),
             (
                 "POST /api/v1/factory/drafts",
-                json!({ "__status": 429, "error": "bob made 30 drafts through agents today (UTC)", "code": "day_limit" }),
+                json!({ "__status": 429, "error": "bob reached today's cap of 30 drafts through agents (UTC)", "code": "day_limit" }),
             ),
         ]);
         let (config, api, creds) = session(&base, &["contribute", "review", "block"]);
@@ -1405,7 +1405,7 @@ mod tests {
             )["content"][0]["text"],
             "HTTP 409: nothing to release"
         );
-        assert_eq!(tool(&mut s, "block", &json!({ "name": "my-app", "reason": "abcd" }))["content"][0]["text"], "HTTP 429 (day_limit): bob made 30 drafts through agents today (UTC) — retry after 60 s");
+        assert_eq!(tool(&mut s, "block", &json!({ "name": "my-app", "reason": "abcd" }))["content"][0]["text"], "HTTP 429 (day_limit): bob reached today's cap of 30 drafts through agents (UTC) — retry after 60 s");
         // A package the story shows the project rebuilding: the claim is still sent, and the pool — which holds the rule, on facts
         // fresher than the edge's story — says why not in its words.
         assert_eq!(

@@ -1138,12 +1138,12 @@ describe("the limits", () => {
     expect(swaps).toEqual([400, 400, 400, 400, 400, 429]);
   });
 
-  it("five requests a day per login, across its grants and agent names: a refused request counts too", async () => {
+  it("five requests a day per contributor's login, across its grants and agent names: a refused request counts too", async () => {
     const a = await login("frank", "Day one");
     for (let i = 0; i < 5; i++) expect((await call("POST", "/factory/packages", { url: "" }, a.token)).status).toBe(400);
     const over = await call("POST", "/factory/packages", { url: "" }, a.token);
     expect([over.status, over.json.code, over.json.limit]).toEqual([429, "day_limit", 5]);
-    expect(over.json.error).toMatch(/^frank made 5 requests through agents today \(UTC\)/);
+    expect(over.json.error).toMatch(/^frank reached today's cap of 5 requests through agents \(UTC\)/);
     expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(0);
     const b = await login("frank", "Day two");
     expect((await request("frankly", b.token)).status).toBe(429);
@@ -1165,14 +1165,14 @@ describe("the limits", () => {
     expect((["requests", "claims", "drafts"] as const).map((k) => [dayCap(k, as("maintainer")), dayCap(k, as("contributor"))])).toEqual([[50, 5], [10, 10], [30, 30]]);
   });
 
-  it("a maintainer's agent takes fifty requests and the fifty-first is answered 429 with limit 50; its claims stop at ten and its drafts at thirty", async () => {
+  it("a maintainer's agent takes fifty requests and the fifty-first is answered 429 with limit 50; its claims stop at ten and its drafts at thirty; taken out of the file, it is back at five", async () => {
     const today = new Date().toISOString().slice(0, 10);
     await env.DB.prepare("UPDATE contributors SET agent_day = NULL, agent_requests = 0, agent_claims = 0, agent_drafts = 0 WHERE login = 'm2'").run();
     const m2 = await login("m2", "Day fifty", "contribute,review");
     for (let i = 0; i < 50; i++) expect((await call("POST", "/factory/packages", { url: "" }, m2.token)).status, `request ${i + 1}`).toBe(400);
     const over = await call("POST", "/factory/packages", { url: "" }, m2.token);
     expect([over.status, over.json.code, over.json.limit]).toEqual([429, "day_limit", 50]);
-    expect(over.json.error).toMatch(/^m2 made 50 requests through agents today \(UTC\)/);
+    expect(over.json.error).toMatch(/^m2 reached today's cap of 50 requests through agents \(UTC\)/);
     expect(await env.DB.prepare("SELECT agent_day, agent_requests FROM contributors WHERE login = 'm2'").first()).toEqual({ agent_day: today, agent_requests: 50 });
     // The maintainer's own request on the web is not an agent's: not counted, not refused.
     expect((await call("POST", "/factory/packages", { url: "" }, "omc_m2")).status).toBe(400);
@@ -1187,6 +1187,16 @@ describe("the limits", () => {
     expect((await call("POST", "/factory/drafts", draft, m2.token)).status).not.toBe(429);
     const drafts = await call("POST", "/factory/drafts", draft, m2.token);
     expect([drafts.status, drafts.json.code, drafts.json.limit]).toEqual([429, "day_limit", 30]);
+    // Taken out of factory/MAINTAINERS.toml (governance sets the role) with fifty on the row: the next call is refused at five, in words that say the cap.
+    await env.DB.prepare("UPDATE contributors SET role = 'contributor' WHERE login = 'm2'").run();
+    try {
+      const demoted = await call("POST", "/factory/packages", { url: "" }, m2.token);
+      expect([demoted.status, demoted.json.code, demoted.json.limit]).toEqual([429, "day_limit", 5]);
+      expect(demoted.json.error).toMatch(/^m2 reached today's cap of 5 requests through agents \(UTC\)/);
+      expect(await env.DB.prepare("SELECT agent_requests FROM contributors WHERE login = 'm2'").first("agent_requests")).toBe(50);
+    } finally {
+      await env.DB.prepare("UPDATE contributors SET role = 'maintainer' WHERE login = 'm2'").run();
+    }
   });
 
   it("with the cost guard up, an agent's write is answered 503 and a person's write on the web is not", async () => {

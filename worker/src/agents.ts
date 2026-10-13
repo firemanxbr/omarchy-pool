@@ -293,7 +293,10 @@ export function daySql(kind: DayKind): string {
 /**
  * The day's count moved before the write, or the 429 to send (with the
  * seconds to the next UTC day), its words and `limit` the cap that applied
- * to the login (dayCap). A write the handler then refuses has still counted.
+ * to the login (dayCap). The words say the cap, not a count: a login taken
+ * out of factory/MAINTAINERS.toml after its sixth request today is refused
+ * at five with more than five on its row. A write the handler then refuses
+ * has still counted.
  */
 export async function dayCount(env: Env, c: Contributor, kind: DayKind, now = new Date()): Promise<Response | null> {
   const cap = dayCap(kind, c);
@@ -301,7 +304,7 @@ export async function dayCount(env: Env, c: Contributor, kind: DayKind, now = ne
   if (res.meta.changes) return null;
   const tomorrow = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
   const words = { requests: "requests", claims: "claims and releases", drafts: "drafts" }[kind];
-  return json({ error: `${c.login} made ${cap} ${words} through agents today (UTC): the next one is taken tomorrow`, code: "day_limit", limit: cap }, 429, { "retry-after": String(Math.max(1, Math.ceil((tomorrow - now.getTime()) / 1000))) });
+  return json({ error: `${c.login} reached today's cap of ${cap} ${words} through agents (UTC): the next one is taken tomorrow`, code: "day_limit", limit: cap }, 429, { "retry-after": String(Math.max(1, Math.ceil((tomorrow - now.getTime()) / 1000))) });
 }
 
 /**

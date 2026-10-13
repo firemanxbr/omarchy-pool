@@ -1036,7 +1036,9 @@ The Worker's side, in vitest on a real local D1
   day's counts are the login's, a new grant or another agent name does not
   start them again, and a release counts toward the day's ten claims. A
   maintainer's agent takes fifty requests and everyone else's five, the
-  429's `limit` saying which; claims and drafts are ten and thirty for both.
+  429's `limit` and words saying which; a maintainer taken out of the file
+  with fifty on the row is refused at five at its next call. Claims and
+  drafts are ten and thirty for both.
 - With the cost guard up, an agent's write is answered 503 and a person's
   write on the web is not.
 - Text evidence answers `public, max-age=30` and `?tail=` gives its last
