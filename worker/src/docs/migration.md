@@ -4,7 +4,7 @@ How to move omarchy-pool from one GitHub account and one Cloudflare account to
 others — for instance from `firemanxbr` to the Omarchy foundation — starting
 from a copy of this repository. Every step is a command or a click; nothing
 depends on the old accounts once it is done. Budget an afternoon, plus the
-hours the first full import takes on a project worker.
+hours the first full import takes on a maintainer's host.
 
 Throughout, replace:
 
@@ -224,7 +224,8 @@ The pool is rebuilt from upstream, not copied (every object is verified against
 its project's keyring on the way in). With A–D in place:
 
 ```bash
-# a project worker (RUNBOOK, Pulled jobs) must be running; as a maintainer:
+# a maintainer's host must be enrolled, confirmed and alive, and host-pool-jobs must name it ('*';
+# RUNBOOK, A new maintainer host and its Pool jobs on hosts); then, as a maintainer:
 export OMARCHY_API=https://pkgs.example.org OMARCHY_TOKEN=omc_…
 pkg-repo job sync --param arch=x86_64 && pkg-repo job sync --param arch=aarch64   # hours; idempotent, queue again if it stops
 pkg-repo job promote --param from=edge --param to=rc --param note=seed
@@ -287,10 +288,9 @@ Until then, moving the pool moves them too:
 - Workers: the pool's compute is its maintainers' hosts — each enrolled
   from its owner's page (*Add a host*, /docs/worker-host), trusted by the
   maintainer list; no registration is trusted one at a time any more (#343:
-  `POST /factory/workers/:id/trust` answers 410). A legacy registration
-  (`POST /factory/workers` with a maintainer's token, #331) that already
-  holds project trust keeps its token as the GitHub secrets
-  `POOL_WORKER_TOKEN_X86_64` / `POOL_WORKER_TOKEN_AARCH64` until P3; `JOB_TOKEN_SECRET` (any random
+  `POST /factory/workers/:id/trust` answers 410), and no legacy
+  registration is made any more (#346: `POST /factory/workers` answers
+  410); `JOB_TOKEN_SECRET` (any random
   string, `npx wrangler secret put JOB_TOKEN_SECRET`) signs the per-job
   tokens.
 - `REPO_URL` in `factory/worker/omarchy-build-worker.sh` and `repo` in

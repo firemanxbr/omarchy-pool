@@ -35,9 +35,9 @@
 #     and, taken away again, by Set agent keys: both read by the recreated
 #     dispatcher's probe mount as their owner, agent.env never a directory.
 #
-# The switch guards that then refuse in that directory (rollout.sh, setup.sh,
-# omarchy-worker, the updater) run against the marker the agent writes in the
-# crate's unit tests (run::orders). Needs a Linux engine: `docker` (rootful,
+# The marker the agent writes there is checked in the crate's unit tests
+# (run::orders); the legacy tools that refused on it left the repository with
+# the legacy sets (#346). Needs a Linux engine: `docker` (rootful,
 # /var/run/docker.sock) or `podman` (rootless, its API socket; started here
 # when it is not). CI runs both (ci.yml); by hand:
 # `bash tests/agent-host-orders.sh docker|podman`.

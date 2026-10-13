@@ -5,9 +5,9 @@
 # (worker/src). The D1 columns stay as history (no DROP), so the migrations
 # (worker/migrations) and the tests that seed rows from before #343
 # (worker/test) may still name them; nothing under worker/src reads or
-# writes them. The command a maintainer's legacy set still runs until P3
-# lives outside the Worker (factory/host/omarchy-worker), and the pool no
-# longer bundles nor serves it.
+# writes them. The command a maintainer's legacy set ran with until P3 is
+# gone from the repository too (#346, tests/legacy-path-gone.sh), and the
+# pool no longer bundles nor serves it.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 src="$root/worker/src"
@@ -38,7 +38,7 @@ if hits="$(grep -rnE "SET[^;\`]*[ ,]mode ?=|INSERT INTO build_workers \([^)]*\bm
 # owner's-builds-only test — a spread (...shared) is no field read.
 if hits="$(grep -rnE "[A-Za-z0-9_)]\.shared\b|\bshared\??: (boolean|unknown)|c\.owner === s\.owner" "$src")"; then say "the claim's shared scope is back in worker/src:"; printf '%s\n' "$hits" >&2; fi
 # The command and the compose file the pool served: not bundled into the Worker any more.
-[[ ! -e "$src/omarchy-worker.sh" ]] || say "worker/src/omarchy-worker.sh is back: the pool serves no command (factory/host/omarchy-worker is a maintainer's legacy set's)"
+[[ ! -e "$src/omarchy-worker.sh" ]] || say "worker/src/omarchy-worker.sh is back: the pool serves no command (a maintainer's machine joins as a host)"
 if hits="$(grep -rnE "from [\"'][^\"']*(omarchy-worker(\.sh)?|image/compose\.yml)[\"']" "$src")"; then say "the Worker bundles the command or its compose file again:"; printf '%s\n' "$hits" >&2; fi
 (( fail == 0 )) || exit 1
 echo "contributor-path-gone: ok"

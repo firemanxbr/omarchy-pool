@@ -10,11 +10,10 @@
 #   empty stops it before pkg-repo starts, never falling back to the plain
 #   variable; the plain variable alone still starts it (a dispatcher started
 #   from an older release's template); neither stops it;
-# - the roles that hold the token in their processes (a project worker, the
-#   broker): the file's token is the one the pool is asked with and the one
-#   pkg-repo work and the broker get, the plain variable's ignored;
-# - an agent sidecar and a builder behind a broker: no token, the file's path
-#   dropped too (and named, for the builder).
+# - a legacy registration's project worker, which holds the token in its
+#   process: the file's token is the one the pool is asked with and the one
+#   pkg-repo work gets, the plain variable's ignored;
+# - an agent sidecar: no token, the file's path dropped too.
 #
 # Stubs for curl, pkg-repo and python3 (the broker); no engine. CI runs it
 # beside tests/entrypoint-agent.sh; by hand: `bash tests/entrypoint-token-file.sh`.
@@ -91,26 +90,15 @@ entry OMARCHY_WORKER_ROLE=pool OMARCHY_WORKER_TOKEN_FILE="$tmp/token" OMARCHY_WO
 grep -q 'authorization: Bearer omw_from_the_file' "$STUB_LOG" || fail "the pool is asked with the file's token: $(cat "$STUB_LOG")"
 grep -q 'omw_plain' "$STUB_LOG" && fail "the plain variable reached the pool or pkg-repo: $(cat "$STUB_LOG")"
 grep -q '^pkg-repo work --arch .* | wt=omw_from_the_file wtf=$' "$STUB_LOG" || fail "pkg-repo work holds the file's token: $(cat "$STUB_LOG")"
-# The broker: the file's token, in its process.
-entry OMARCHY_WORKER_ROLE=broker OMARCHY_WORKER_TOKEN_FILE="$tmp/token" || fail "the broker: $(cat "$tmp/stderr")"
-grep -q '^python3 /usr/local/lib/omarchy-factory/bin/broker | wt=omw_from_the_file wtf=$' "$STUB_LOG" || fail "the broker holds the file's token: $(cat "$STUB_LOG")"
-if entry OMARCHY_WORKER_ROLE=broker OMARCHY_WORKER_TOKEN_FILE="$tmp/missing" OMARCHY_WORKER_TOKEN=omw_plain; then fail "the broker started without its file"; fi
-[[ ! -s "$STUB_LOG" ]] || fail "the broker ran without its file: $(cat "$STUB_LOG")"
-echo "ok: a project worker and the broker take the file's token"
+if entry OMARCHY_WORKER_ROLE=pool OMARCHY_WORKER_TOKEN_FILE="$tmp/missing" OMARCHY_WORKER_TOKEN=omw_plain OMARCHY_WORK_DIR="$tmp/work"; then fail "a pool worker started without its file"; fi
+[[ ! -s "$STUB_LOG" ]] || fail "a pool worker ran without its file: $(cat "$STUB_LOG")"
+echo "ok: a legacy project worker takes the file's token"
 
-# 5. An agent sidecar holds no token, the file's path included; a builder behind a broker drops it and says so.
+# 5. An agent sidecar holds no token, the file's path included — nor does an agent role started without a keys file.
 printf 'ANTHROPIC_API_KEY=sk-ant-from-the-file\n' > "$tmp/agent.env"
 entry OMARCHY_WORKER_ROLE=agent OMARCHY_AGENT_ENV="$tmp/agent.env" OMARCHY_WORKER_TOKEN_FILE="$tmp/token" || fail "an agent sidecar: $(cat "$tmp/stderr")"
 grep -q '^python3 /usr/local/lib/omarchy-factory/bin/broker | wt= wtf=$' "$STUB_LOG" || fail "an agent sidecar holds no token: $(cat "$STUB_LOG")"
-cat > "$tmp/bin/curl" <<'S'
-#!/usr/bin/env bash
-echo "curl $*" >> "$STUB_LOG"
-printf '{"id":"m1-laptop-0a9z","trust":"community","arch":"%s","owner":"m1"}\n' "$STUB_ARCH"
-S
-printf '#!/usr/bin/env bash\necho "builder | wt=${OMARCHY_WORKER_TOKEN:-} wtf=${OMARCHY_WORKER_TOKEN_FILE:-}" >> "$STUB_LOG"\n' > "$tmp/bin/omarchy-build-worker"
-chmod +x "$tmp/bin/curl" "$tmp/bin/omarchy-build-worker"
-entry OMARCHY_BROKER=http://broker:8790 OMARCHY_WORKER_TOKEN_FILE="$tmp/token" || fail "a builder: $(cat "$tmp/stderr")"
-grep -q '^builder | wt= wtf=$' "$STUB_LOG" || fail "a builder behind a broker holds no token: $(cat "$STUB_LOG")"
-grep -q 'OMARCHY_WORKER_TOKEN_FILE is set on a builder behind a broker' "$tmp/stderr" || fail "and says so: $(cat "$tmp/stderr")"
-echo "ok: an agent sidecar and a builder behind a broker hold no token, nor its file"
+entry OMARCHY_WORKER_ROLE=agent OMARCHY_WORKER_TOKEN_FILE="$tmp/token" OMARCHY_WORKER_TOKEN=omw_plain || fail "an agent role: $(cat "$tmp/stderr")"
+grep -q '^python3 /usr/local/lib/omarchy-factory/bin/broker | wt= wtf=$' "$STUB_LOG" || fail "an agent role holds no token: $(cat "$STUB_LOG")"
+echo "ok: an agent sidecar holds no token, nor its file"
 echo "entrypoint token file: ok"

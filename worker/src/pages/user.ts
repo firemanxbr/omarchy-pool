@@ -2,7 +2,7 @@
  * A contributor's or maintainer's public page: who they are on GitHub,
  * what they registered and built, what they approved, the workers they run.
  * Their own page is also their workspace — "Sign in with GitHub" lands here:
- * Build and remove on the packages, register and revoke on the workers, the
+ * Build and remove on the packages, drain and revoke on the workers, the
  * evidence of every build, the staging quota, a token for scripts. Everything
  * is the public API (`/api/v1/factory/*`) with the browser session.
  *
@@ -42,29 +42,25 @@ import { UNPIN_AFTER_DRAIN_MINUTES } from "../orders";
  * the shell's servedGrey, what gate() writes — and drawn again through
  * gate() once the server said what this viewer may do: live for the owner,
  * the sign-in for nobody. One template each, in the HTML and in the script.
- * Share and the register toggle are served live: the page is public and
- * its link is anyone's, and the toggle only shows the form, whose fields
- * are the gated ones.
+ * Share is served live: the page is public and its link is anyone's.
  */
 const SHARE_BTN = `<button type="button" class="op-btn" id="share-open" title="the link to this page, to post anywhere">Share</button>`;
 const TOKEN_BTN = `<button type="button" class="op-btn" id="token-open" title="a token for scripts and CI">Token</button>`;
 const REQUEST_LINK = `<a class="more-link" id="pk-request" href="/factory#request">+ request one →</a>`;
-const REGISTER_TOGGLE = `<button type="button" class="more-link" id="w-toggle" title="the form: a name, an architecture, one command to run it">+ register one</button>`;
-const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="laptop" required></label> <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label> <button type="submit" id="w-btn">Register worker</button>`;
 /**
- * The workers are the maintainers' (#331, design v2 §6.5): the project
- * provides them for everyone and its maintainers are their only providers.
- * The one exception to the page's rule that every control is drawn for
- * every viewer: "Run a worker" and the worker form are not served, and the
- * script draws them for a maintainer on their own page only (the shell's
- * isMaintainer() and isOwner(), from /auth/me); everyone else reads that
- * their packages build on the pool's hosts, with the way to the packaging
- * docs — except on a maintainer's page, whose section lists the hosts they
+ * The workers are the maintainers' hosts (#331, #346, design v2 §6.5): the
+ * project provides them for everyone and its maintainers are their only
+ * providers. Nothing to run is served; a maintainer on their own page reads
+ * that their new machine joins as a host (the Hosts section below) and that
+ * no legacy registration is made any more (#346: POST /factory/workers
+ * answers 410) — there is no worker form; everyone else reads that their
+ * packages build on the pool's hosts, with the way to the packaging docs —
+ * except on a maintainer's page, whose section lists the hosts they
  * provide, where the line is hidden. POST /factory/workers refuses a
  * contributor with the same sentence (POOL_HOSTS).
  */
 const poolHostsLine = () => `<p class="sub" id="w-pool" style="margin:0 0 10px;font-size:12.5px">Nothing to run here: ${POOL_HOSTS}, which the maintainers provide. Request a package and the pool builds it. <a href="/docs/factory#contribute-a-package">How packaging works →</a></p>`;
-const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts, and a new machine is added as a host (below). A registration here is a legacy one, for a set you already run — the Studio's role containers, an omarchy-worker set — until P3 retires them: its token, shown once, builds any contributor's packages, as a host does. <a href="/docs/workers">Run a worker →</a></p><form id="worker-form" class="form" onsubmit="return false" hidden></form><div id="w-new" hidden><p class="sub">Your worker token, shown once, and where it goes:</p><pre id="w-cmd"></pre></div>`;
+const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts, and a new machine is added as a host (below). The legacy registrations from before hosts retired with P3 (#346): none is made any more, one not retired yet is listed here until its owner or a maintainer revokes it, and each keeps its history on its page. <a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></p>`;
 /**
  * Add a host (#321, design v2 §6.1): a maintainer's, on their own page — a
  * name and where it runs; the answer is one command to paste on the machine,
@@ -207,7 +203,7 @@ const body = (login: string) => String.raw`
 
   <section class="up-workers" aria-labelledby="workers-h">
     <div class="up-sec-h"><h2 id="workers-h">Workers</h2><span id="w-slot"></span></div>
-    <p class="up-note">The machines under this name, as the <a href="/workers">Workers</a> page shows them. The id opens a worker's page; Drain and Revoke are on its row.</p>
+    <p class="up-note">The registrations under this name: each host's own, whose Operate → opens its host's page, and any legacy one from before hosts until it is revoked (#346). Each keeps its history on its page: the id opens it; Drain and Revoke are on its row. The machines this person provides are hosts, below and on the <a href="/workers">Workers</a> page.</p>
     <div id="w-own">${poolHostsLine()}</div>
     ${workerPanels([
       { kind: "community", blurb: "legacy community sets, until they retire: any contributor's packages, as a host builds them", hidden: true },
@@ -272,7 +268,7 @@ const SCRIPT = String.raw`
   function removeOf(name) { var p = CAN.packages[name]; return p ? { ok: p.remove === true, why: p.why || "" } : { ok: may("remove"), why: reason("remove") }; }
   // Revoke, Drain and Resume are answered per worker (a revoked one is gone: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
   function workerCan(w, right) { var x = CAN.workers[w.id]; return x ? { ok: x[right] === true, why: (x.why && x.why[right]) || "" } : { ok: may(right), why: reason(right) }; }
-  var SHARE_BTN = ${JSON.stringify(SHARE_BTN)}, TOKEN_BTN = ${JSON.stringify(TOKEN_BTN)}, REQUEST_LINK = ${JSON.stringify(REQUEST_LINK)}, WORKER_FORM = ${JSON.stringify(WORKER_FORM)}, REGISTER_TOGGLE = ${JSON.stringify(REGISTER_TOGGLE)}, WORKER_OWN = ${JSON.stringify(WORKER_OWN)};
+  var SHARE_BTN = ${JSON.stringify(SHARE_BTN)}, TOKEN_BTN = ${JSON.stringify(TOKEN_BTN)}, REQUEST_LINK = ${JSON.stringify(REQUEST_LINK)}, WORKER_OWN = ${JSON.stringify(WORKER_OWN)};
   var HOST_TOGGLE = ${JSON.stringify(HOST_TOGGLE)}, HOST_FORM = ${JSON.stringify(HOST_FORM)}, HOST_OWN = ${JSON.stringify(HOST_OWN)};
   var DRAWN = false, WORKER_DRAWN = false, HOST_DRAWN = false, HOSTS = null, WAIT_UNTIL = 0, HOST_T = 0;
   function loadCan() {
@@ -310,16 +306,12 @@ const SCRIPT = String.raw`
       });
     };
   }
-  // The way to request a package, for everyone, the owner's to press: served grey with whose it is, drawn again from the server's word. The way in for a worker — "Run a worker", the toggle and the form behind it — is a maintainer's (#331): drawn for a maintainer on their own page only, the form's fields grey with why where the server says no (blocked); everyone else keeps the served line, their packages build on the pool's hosts.
+  // The way to request a package, for everyone, the owner's to press: served grey with whose it is, drawn again from the server's word. A maintainer on their own page reads where their machine goes — a host, below — and that no legacy registration is made any more (#346): no form; everyone else keeps the served line, their packages build on the pool's hosts.
   function renderRegister() {
     $("#pk-request").outerHTML = gate(REQUEST_LINK, may("request"), reason("request"));
-    if (!isMaintainer() || !isOwner(login)) return;
-    if (!WORKER_DRAWN) {
-      WORKER_DRAWN = true;
-      $("#w-own").innerHTML = WORKER_OWN; $("#w-slot").innerHTML = REGISTER_TOGGLE;
-      $("#w-toggle").onclick = function () { $("#worker-form").hidden = !$("#worker-form").hidden; };
-    }
-    $("#worker-form").innerHTML = gate(WORKER_FORM, may("register"), reason("register"));
+    if (!isMaintainer() || !isOwner(login) || WORKER_DRAWN) return;
+    WORKER_DRAWN = true;
+    $("#w-own").innerHTML = WORKER_OWN;
   }
   // Hosts (#321): the way in is a maintainer's, on their own page only — the toggle, the form and the command it answers; the hosts under this name for everyone, their details (the fingerprint, the capacity) for their owner and the maintainers, Confirm on a host that waits, live for its owner and grey with whose it is for anyone else.
   function renderHostForm() {
@@ -444,6 +436,12 @@ const SCRIPT = String.raw`
     return gate('<button type="button" class="small-btn" data-worker-order="' + kind + '" data-worker="' + esc(w.id) + '" title="' + (kind === "drain" ? "hand it nothing from its next claim: a task in hand runs to its end" : "hand it work again from its next claim") + '">' + (kind === "drain" ? "Drain" : "Resume") + '</button>', order.ok, order.why)
       + ' ' + gate('<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>', revoke.ok, revoke.why)
       + ' <a class="small-btn" href="' + there + '" title="' + (host ? "its host's page: Suspend, Resume, Retire, Drain" :"its page: Re-check agent, Restart, Update, Stop its task") + '">Operate →</a>';
+  }
+  // The Revoke dialog's words, by what the row is: a host's registration sends the reader to its host's page, where a host is drained, suspended or retired; a legacy one from before hosts says nothing replaces it (#346) — a machine joins as a host. A row the listing no longer holds gets the two sentences every revoke shares.
+  function revokeWords(w) {
+    var said = "Its token stops working at once; a build it holds finishes on its own. Its history stays on its page.";
+    if (!w) return said;
+    return said + (w.kind === "host" && w.host_id ? " It is a host's registration: a host is drained, suspended or retired on its host's page." : " No new registration replaces it (#346): a machine joins as a host.");
   }
   // Drain and Resume, asked as the worker's page asks them, with a reason for the journal: the order holds from its issue (#277, part 2), and the door's note says what follows.
   var UNPIN_MIN = ${UNPIN_AFTER_DRAIN_MINUTES};
@@ -615,7 +613,7 @@ const SCRIPT = String.raw`
       if (incomplete) return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged, but the request is not what the form asks today — ' + (own ? '<b>Renew the request</b> above: the same form, filled from the record; the build stays and is ready the moment the record is — of this version.' : 'the contributor renews the request; the build stays.');
       if (vet && vet.verdict !== "pass") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> built, but <b>the gate failed</b>: ' + esc((vet.failed || []).join(", ")) + (own ? again('each failed check is named there and explained in <a href="/docs/what-we-test">What we test</a>') : ' — the contributor fixes the recipe and builds again.');
       if (audit && audit.status === "done" && audit.result && audit.result.verdict === "block") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate, but <b>the audit blocked it</b>: ' + esc(audit.result.summary || '') + (own ? again('the report in ' + evidenceLink(cc, "the evidence of #" + cc.id) + ' lists the findings and the fix for each') : ' — the contributor answers the findings and builds again.');
-      if (audit && audit.status !== "done") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate; the audit is ' + esc(audit.status) + ' on the project\'s review worker — nothing to do until it answers.';
+      if (audit && audit.status !== "done") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate; the audit is ' + esc(audit.status) + ' on a maintainer\'s host — nothing to do until it answers.';
       if (audit && audit.status === "failed") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate, but the audit did not run (' + esc(audit.error || '') + ') — ' + (own ? 'press <b>Build ' + esc(arch) + '</b> again: a new build gets a new audit.' : 'the contributor builds again.');
       var reqItem = (sc.items || []).filter(function (i) { return i.item === "A request on the record"; })[0];
       if (reqItem && reqItem.points < reqItem.max && st.request && st.request.version) return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged, but the request now names <b>' + esc(st.request.version) + '</b> and this build is ' + esc(cc.version || '?') + ' — ' + (own ? 'press <b>Build ' + esc(arch) + '</b>: the build of that version is the evidence.' : 'the contributor builds that version.');
@@ -891,32 +889,13 @@ const SCRIPT = String.raw`
       });
     }
     else if (b.hasAttribute("data-revoke")) {
-      var wid = b.getAttribute("data-revoke");
-      ask({ title: "Revoke " + wid + "?", text: "Its token stops working at once; a build it holds finishes on its own. Register a new one for a new token.", confirm: "Revoke", danger: true }).then(function (go) {
+      var wid = b.getAttribute("data-revoke"), row = FACTORY ? FACTORY.workers.filter(function (x) { return x.id === wid; })[0] : null;
+      ask({ title: "Revoke " + wid + "?", text: revokeWords(row), confirm: "Revoke", danger: true }).then(function (go) {
         if (go === null) return;
         api("DELETE", API + "/workers/" + encodeURIComponent(wid)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked."); acted(); load(); loadWorkers(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
   });
-  // The worker form is drawn for a maintainer only (renderRegister): one delegated handler, whenever it is there.
-  document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "worker-form") { ev.preventDefault(); registerWorker(); } });
-  function registerWorker() {
-    var body = { name: $("#w-name").value.trim(), arch: $("#w-arch").value };
-    $("#w-btn").disabled = true;
-    api("POST", API + "/workers", body).then(function (d) {
-      $("#w-btn").disabled = false;
-      if (d.error) { toast(esc(d.error), "error"); return; }
-      $("#w-new").hidden = false;
-      $("#w-cmd").textContent =
-        "# a legacy registration (#343): its token, shown once, for a set you already run — the Studio's role containers, or an omarchy-worker set:\n" +
-        "OMARCHY_WORKER_TOKEN=" + d.token + "\n" +
-        "# put it in the set's .env (or etc/<service>.env on the Studio) and start the set again; an omarchy-worker set, in its directory, with the\n" +
-        "# repository's factory/host/omarchy-worker (a copy the pool served fetches a compose file it no longer serves):\n" +
-        "./omarchy-worker start --token " + d.token + "\n" +
-        "# a new machine joins the pool as a host instead (+ add a host, below): " + location.origin + "/docs/worker-host";
-      $("#worker-form").reset(); $("#worker-form").hidden = true; acted(); load(); loadWorkers();
-    }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
-  }
 `;
 
 export function userHtml(login: string, poolUrl: string, version: RunningVersion): string {
@@ -1212,12 +1191,12 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The way in for a worker is a maintainer's (#331): served, the line that a contributor's packages build on the pool's hosts, with the packaging docs; hidden on a maintainer's page, whose section lists the hosts they provide; drawn for a maintainer on their own page only, "Run a worker", the toggle and the form, its fields grey with the server's word where it says no. The door refuses a contributor with the same sentence.
+      // Nothing to run (#331, #346): served, the line that a contributor's packages build on the pool's hosts, with the packaging docs; hidden on a maintainer's page, whose section lists the hosts they provide; drawn for a maintainer on their own page only, where their machine goes — a host — and that no legacy registration is made any more: no form. The door refuses a contributor with the same sentence, and a maintainer with 410.
       id: "user.workers-register",
       page,
       anchor: ['id="w-slot"', 'id="w-own"', 'id="w-pool"', `Nothing to run here: ${POOL_HOSTS}, which the maintainers provide.`, 'href="/docs/factory#contribute-a-package"'],
-      script: ["if (!isMaintainer() || !isOwner(login)) return;", 'function renderPoolLine(role) { var line = $("#w-pool"); if (line && role === "maintainer") line.hidden = true; }', "renderPoolLine(d.role);", "WORKER_OWN", "REGISTER_TOGGLE", '"#w-slot"', '"#w-toggle"', 'gate(WORKER_FORM, may("register"), reason("register"))', '"#worker-form"', '"#w-name"', '"#w-arch"', '"#w-btn"', 'api("POST", API + "/workers", body)', '\\"/docs/workers\\"'],
-      acts: [{ method: "POST", path: "/api/v1/factory/workers", body: { name: "laptop", arch: F.arch }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
+      script: ["if (!isMaintainer() || !isOwner(login) || WORKER_DRAWN) return;", 'function renderPoolLine(role) { var line = $("#w-pool"); if (line && role === "maintainer") line.hidden = true; }', "renderPoolLine(d.role);", "WORKER_OWN", '"#w-own"', '\\"/docs/worker-host#maintainer-hosts\\"'],
+      acts: [{ method: "POST", path: "/api/v1/factory/workers", body: { name: "laptop", arch: F.arch }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 410 } }],
       visible: ["maintainer"],
     },
     {
@@ -1258,19 +1237,12 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      id: "user.worker-token-block",
-      page,
-      anchor: [],
-      script: ['"#w-new"', '"#w-cmd"', "--token \" + d.token"],
-      visible: ["maintainer"],
-    },
-    {
-      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Drain (or Resume), Revoke and the way to its page's Operate for whoever looks (#412), the buttons grey with the state's word first (revoked already) and the role's after (the owner's, and a maintainer's), the shell's log icon beside the id the same way; the Revoke dialog is this entry's. A worker's mode, and Share / Own only with it, are gone (#343): its door answers 410.
+      // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Drain (or Resume), Revoke and the way to its page's Operate for whoever looks (#412), the buttons grey with the state's word first (revoked already) and the role's after (the owner's, and a maintainer's), the shell's log icon beside the id the same way; the Revoke dialog is this entry's, its words by what the row is: a host's registration sends the reader to its host's page, a legacy one says nothing replaces it (#346). A worker's mode, and Share / Own only with it, are gone (#343): its door answers 410.
       id: "user.workers-tables",
       page,
       shared: "worker-table",
       anchor: ['id="wp-community"', 'id="w-community"', 'id="wp-review"', 'id="w-review"', 'id="wp-project"', 'id="w-project"', 'id="w-none"'],
-      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"', '#wk-operate', '#hp-operate', "Operate →"],
+      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, "revoke")', "data-revoke", "function revokeWords(", "text: revokeWords(row)", 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"', '#wk-operate', '#hp-operate', "Operate →"],
       reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update", "workers.0.kind", "workers.0.host_id", "workers.0.drained"] }],
       acts: [
         { method: "DELETE", path: `/api/v1/factory/workers/${F.ownerWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },

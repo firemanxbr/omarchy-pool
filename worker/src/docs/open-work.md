@@ -118,10 +118,10 @@ architecture · the client's hook preview, config example and ring check ·
 binaries embed (Go modules, cargo-auditable crates) in the manifest and the
 index · OSV advisories against them · the ABI gate against an Omarchy
 installation too · the verify job (served OPR objects checked and repaired) ·
-the project's workers as three roles of one image (pool, review, community) on
-its own host (`factory/host/`: setup, registration, compose) with a shared
-package cache, and GitHub Actions for CI and the release only (the hosted
-fallback worker is gone).
+the project's compute as its maintainers' hosts — one signed bundle each, one
+isolated, credential-less container per task, as many as its capacity allows
+(#307), the legacy sets of fixed containers per role retired (#346) —, and GitHub
+Actions for CI and the release only (the hosted fallback worker is gone).
 
 ## Factory findings (2026-09-12)
 

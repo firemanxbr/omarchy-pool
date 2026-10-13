@@ -1,13 +1,13 @@
 //! #344's acceptance criteria on the agent's side, against the fake engine and pool (the
 //! real-engine test is `tests/agent-host-orders.sh`): the release target from the host
 //! state, `reconcile-now`, `retire-legacy` against a stand-in legacy project, the refusals
-//! (an unknown kind, an expired order, a repeated id), the report that carries the
-//! answers, and #313's switch guards against the marker the agent writes.
+//! (an unknown kind, an expired order, a repeated id), and the report that carries the
+//! answers. The legacy tools whose #313 guards refused on the marker the agent writes
+//! left the repository with the legacy sets (#346); the marker itself is checked here.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::install::legacy::{self, Legacy};
 use crate::run::fake::World;
@@ -493,132 +493,6 @@ fn retire_legacy_stops_and_removes_exactly_the_recorded_project_writes_the_marke
         .1
         .starts_with("omarchy-pool was retired already, at 2027-01-15T"));
     assert_eq!(w.changes().len(), before);
-}
-
-/// The repository's own scripts, as #313 shipped them.
-fn repo(path: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(path)
-}
-
-/// `name` as the test's own PATH finds it.
-fn real(name: &str) -> PathBuf {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| panic!("{name} is not on PATH"))
-}
-
-/// A PATH for the guards: the few tools they read with, and stubs for docker, curl and
-/// jq that answer nothing — no engine, package manager, chown or systemctl anywhere.
-fn stub_path(dir: &Path) -> PathBuf {
-    let bin = dir.join("bin");
-    let _ = fs::remove_dir_all(&bin);
-    fs::create_dir_all(&bin).unwrap();
-    for tool in [
-        "dirname", "env", "id", "getent", "grep", "tr", "cat", "rm", "date",
-    ] {
-        if let Some(p) = std::env::var_os("PATH")
-            .into_iter()
-            .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-            .map(|d| d.join(tool))
-            .find(|p| p.is_file())
-        {
-            std::os::unix::fs::symlink(p, bin.join(tool)).unwrap();
-        }
-    }
-    for stub in ["docker", "curl", "jq"] {
-        // Started by the guards' shells: written where no fork of this process can hold it.
-        crate::run::exec::write_stub(&bin.join(stub), "#!/bin/sh\nexit 0\n");
-    }
-    bin
-}
-
-fn run(cmd: &mut Command) -> (Option<i32>, String) {
-    let o = cmd.output().unwrap();
-    (
-        o.status.code(),
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
-        ),
-    )
-}
-
-/// What each of #313's four guards answers in `dir`: rollout.sh (from the directory, as
-/// setup.sh installs it), setup.sh (`with_setup`: its root check lifted in a copy, as
-/// tests/host-setup.sh does; it runs as root on a host), `omarchy-worker update` (a
-/// maintainer's legacy set's command, factory/host/omarchy-worker since #343) and the
-/// updater's `--self-test`. `true`: it refused because of the marker.
-fn guards(dir: &Path, scratch: &Path, with_setup: bool) -> Vec<(bool, String)> {
-    let bash = real("bash");
-    let path = stub_path(scratch);
-    let says = "this machine is a maintainer host managed by omarchy-agent, which retired this set";
-    let marker = format!("{}/.omarchy-agent", dir.display());
-    let refused = |(code, out): &(Option<i32>, String), want: i32| {
-        *code == Some(want) && out.contains(says) && out.contains(&marker)
-    };
-    fs::copy(repo("factory/host/rollout.sh"), dir.join("rollout.sh")).unwrap();
-    let mut out = Vec::new();
-    let r = run(Command::new(&bash)
-        .arg(dir.join("rollout.sh"))
-        .env("PATH", &path)
-        .current_dir(scratch));
-    out.push((refused(&r, 4), r.1));
-    if with_setup {
-        let setup = fs::read_to_string(repo("factory/host/setup.sh"))
-            .unwrap()
-            .replace("[[ $EUID -eq 0 ]]", "[[ 0 -eq 0 ]]");
-        fs::write(scratch.join("setup.sh"), setup).unwrap();
-        let r = run(Command::new(&bash)
-            .arg(scratch.join("setup.sh"))
-            .arg(dir)
-            .env("SUDO_USER", "omarchy")
-            .env("PATH", &path));
-        out.push((refused(&r, 4), r.1));
-    }
-    let r = run(Command::new(&bash)
-        .arg(repo("factory/host/omarchy-worker"))
-        .arg("update")
-        .env("OMARCHY_WORKER_DIR", dir)
-        .env("HOME", scratch)
-        .env("PATH", &path));
-    out.push((refused(&r, 1), r.1));
-    let r = run(Command::new(&bash)
-        .arg(repo("factory/bin/omarchy-rollout"))
-        .arg("--self-test")
-        .env("COMPOSE_DIR", dir)
-        .env("PATH", &path));
-    let stands = r.0 == Some(0) && r.1.trim_end().ends_with("stands-down") && r.1.contains(&marker);
-    out.push((stands, r.1));
-    out
-}
-
-#[test]
-fn after_retire_legacy_rollout_setup_the_cli_and_the_updater_refuse_in_that_directory() {
-    let (mut w, dir) = beside_a_legacy_set(true);
-    let scratch = w.dir.join("guards");
-    fs::create_dir_all(&scratch).unwrap();
-    // Before the order no marker: none of them stands down (setup.sh is not run without
-    // the marker: it would set a host up).
-    for (refused, out) in guards(&dir, &scratch, false) {
-        assert!(!refused, "refused before any marker: {out}");
-    }
-    w.orders(&[("retire-legacy", "ho_g", 3600)]);
-    w.poll();
-    for _ in 0..5 {
-        w.tick(3);
-    }
-    assert_eq!(answer_of(&w, "ho_g").0, "done");
-    let after = guards(&dir, &scratch, true);
-    assert_eq!(after.len(), 4);
-    for (refused, out) in after {
-        assert!(refused, "does not refuse after retire-legacy: {out}");
-    }
 }
 
 #[test]
