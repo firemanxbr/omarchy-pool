@@ -3,8 +3,10 @@
  * is a maintainer host like any other — one bundle, its capacity, lanes and
  * isolation level said, nothing to run on the machine for a release — its
  * legacy set retired, with the queries that show no legacy registration is
- * left and that the pool's jobs go to the hosts; and AC4 of #277: its *After
- * a release* asks nobody to touch a host.
+ * left and that the pool's jobs go to the hosts; its *The Studio at subuid*
+ * (#407), the move to subuid in one root session, in the words of the code
+ * it runs; and AC4 of #277: its *After a release* asks nobody to touch a
+ * host.
  *
  * The runbook is the text the docs pages serve (bundled as text by
  * wrangler.toml's rules, as pages/docs-tree.ts imports it). Its sections are
@@ -51,12 +53,13 @@ const LEGACY_TOOLS = ["./rollout.sh", "setup.sh", "register.sh", "omarchy-worker
 describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
   const studio = cut(runbook, "the-studio-host");
 
-  it("is a real section with three subsections, the Studio's x86_64 VM (#413), its retired legacy set and After a release, which the reviewing section follows", () => {
+  it("is a real section with four subsections, the Studio's x86_64 VM (#413), its move to subuid (#407), its retired legacy set and After a release, which the reviewing section follows", () => {
     const heads = outline(runbook);
     const at = heads.findIndex((h) => h.id === "the-studio-host");
     expect(heads[at].level).toBe(2);
-    expect(heads.slice(at + 1, at + 5).map((h) => [h.level, h.id])).toEqual([
+    expect(heads.slice(at + 1, at + 6).map((h) => [h.level, h.id])).toEqual([
       [3, "the-studio-s-x86-64-vm"],
+      [3, "the-studio-at-subuid"],
       [3, "its-legacy-set-retired"],
       [3, "after-a-release"],
       [2, "maintainers-reviewing-contributed-builds"],
@@ -178,3 +181,206 @@ describe("the runbook's GitHub settings the signature relies on (#308)", () => {
   });
 });
 
+// The Studio's move to subuid (#407): the root session's words are prep-root.sh's, the agent's and the dispatcher's own.
+import installSource from "../../crates/omarchy-agent/src/install/mod.rs?raw";
+import checksSource from "../../crates/omarchy-agent/src/install/checks.rs?raw";
+import prepRoot from "../../factory/host/prep-root.sh?raw";
+import rolloutSource from "../../crates/omarchy-agent/src/run/rollout.rs?raw";
+import enrollSource from "../../crates/omarchy-agent/src/enroll.rs?raw";
+import dispatcherEnvSource from "../../crates/omarchy-agent/src/dispatcher_env/mod.rs?raw";
+import dispatchSource from "../../crates/pkg-repo/src/dispatch/mod.rs?raw";
+import remapSource from "../../crates/omarchy-agent/src/dispatcher_env/remap.rs?raw";
+import factorySource from "../src/routes/factory.ts?raw";
+
+describe("the runbook's Studio at subuid (#407)", () => {
+  const sec = cut(runbook, "the-studio-at-subuid");
+  /** As a reader reads it: a command's continuations, line breaks and indentation folded. */
+  const text = sec.replace(/\\\n/g, " ").replace(/\s+/g, " ");
+  const at = (s: string) => {
+    const i = text.indexOf(s);
+    expect(i, s).toBeGreaterThan(0);
+    return i;
+  };
+  const install = "sh ~/install.sh --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets --task-subnets 10.232.0.0/16 --dedicated --agent-env-from /srv/omarchy-host-secrets/agent.env";
+  const prep = 'sudo bash "$src/factory/host/prep-root.sh" --user "$USER" --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --remap-existing-daemon';
+
+  it("is a subsection of The Studio host, after its x86_64 VM and before its retired legacy set", () => {
+    const heads = outline(runbook);
+    const i = (id: string) => heads.findIndex((h) => h.id === id);
+    expect(heads[i("the-studio-at-subuid")]?.level).toBe(3);
+    expect(heads.slice(0, i("the-studio-at-subuid")).reverse().find((h) => h.level <= 2)?.id).toBe("the-studio-host");
+    expect(i("the-studio-s-x86-64-vm")).toBeGreaterThan(0);
+    expect(i("the-studio-s-x86-64-vm")).toBeLessThan(i("the-studio-at-subuid"));
+    expect(i("the-studio-at-subuid")).toBeLessThan(i("its-legacy-set-retired"));
+  });
+
+  it("drains the host, stops its agent and dispatcher, runs prep-root.sh's opt-in after its dry run, sets the build caches aside, then installs again, and resumes", () => {
+    const steps = [
+      "**Drain** studio-m2's registration",
+      `grep -c -- '--remap-existing-daemon) remap_existing' "$src/factory/host/prep-root.sh"`,
+      "systemctl --user stop omarchy-agent",
+      "docker stop omarchy-host-dispatcher-1",
+      `${prep} --dry-run`,
+      `${prep} \`\`\``,
+      "mv \"$d\" \"$d.pre-remap\"",
+      install,
+      "**Resume** studio-m2's registration",
+    ].map(at);
+    expect([...steps].sort((a, b) => a - b)).toEqual(steps);
+    // The opt-in is prep-root.sh's own, refused while the agent or a container runs.
+    expect(prepRoot).toContain("--remap-existing-daemon) remap_existing=1; shift ;;");
+    expect(prepRoot).toContain('refuse "$(grep -c . <<<"$names") container(s) run (');
+    expect(text).toContain("`container(s) run (…)`");
+    expect(prepRoot).toContain('agent_pids="$(pgrep -u "$user" -x omarchy-agent)"');
+    expect(prepRoot).toContain('refuse "the agent runs as $user (omarchy-agent, pid ');
+    expect(text).toContain("`the agent runs as firemanxbr (omarchy-agent, pid …)`");
+    // Why the agent goes first: a dispatcher its round starts on the remapped daemon holds the model kinds.
+    expect(text).toContain("`OMARCHY_AGENT_USER` (agent.env's owner) is no container user of a remapped daemon");
+    expect(dispatchSource).toContain("names agent.env's owner, and no container user of this remapped daemon is it");
+  });
+
+  it("checks that the pool's release carries the opt-in before the host is drained, and again before anything stops", () => {
+    // The check's pattern is the opt-in's own case line, once in prep-root.sh.
+    expect(prepRoot.split("--remap-existing-daemon) remap_existing").length - 1).toBe(1);
+    const site = `curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/prep-root.sh" | grep -c -- '--remap-existing-daemon) remap_existing'`;
+    expect(at(site)).toBeLessThan(at("**Drain** studio-m2's registration"));
+    expect(at(`grep -c -- '--remap-existing-daemon) remap_existing' "$src/factory/host/prep-root.sh"`)).toBeLessThan(at("systemctl --user stop omarchy-agent"));
+  });
+
+  it("says what prep-root.sh prints when it is right, in its own words", () => {
+    const said: [string, string][] = [
+      ["`the daemon holds N container(s) and M image(s), none of them running`", "the daemon holds ${counts% *} container(s) and ${counts#* } image(s), none of them running"],
+      ["`dockremap's subordinate ids: 165536-231071, its own`", "dockremap's subordinate ids: $start-$((start + 65535)), its own"],
+      ["`turned on: a container escape lands in an unprivileged subuid`", "turned on: a container escape lands in an unprivileged subuid"],
+      ["`the old data root, /var/lib/docker (storage driver overlayfs, containerd namespace moby), stays as it is`", "the old data root, ${old_root:-?} (storage driver ${old_driver:-?}"],
+      ["`the way back: install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json && systemctl restart docker.service`", "the way back: install -m 0644 $daemon_json.pre-remap $daemon_json && systemctl restart docker.service"],
+      ["`docker remaps users (docker info lists name=userns): its data root /var/lib/docker/165536.165536, storage driver overlay2, containerd namespace moby-165536.165536`", "docker remaps users (docker info lists name=userns): its data root ${new_root:-?}, storage driver ${new_driver:-?}"],
+      ["`in place, applied again after docker's restart`", "in place, applied again after docker's restart"],
+      ["`userns-remap: docker info does not list name=userns after the restart`", "userns-remap: docker info does not list name=userns after the restart"],
+      ["`userns-remap: docker did not start with it, and is down`", "userns-remap: docker did not start with it, and is down (journalctl -u docker says why); the way back: $back"],
+    ];
+    for (const [doc, code] of said) {
+      expect(text, doc).toContain(doc);
+      expect(prepRoot, code).toContain(code);
+    }
+    expect(prepRoot).toContain(", containerd namespace $old_ns");
+    expect(prepRoot).toContain("), stays as it is: the remapped daemon starts empty");
+    // dockremap's range after firemanxbr:100000:65536, and the sidecars' uid in it.
+    expect(text).toContain("host uid 231069 (65533 inside)");
+    expect(remapSource).toContain("pub const SIDECAR_ID: u32 = 65_533;");
+  });
+
+  it("installs again with the keys' own file and neither an enrollment token nor --legacy, and says what it prints in the agent's words", () => {
+    // The session's install and the way back's are the same command.
+    expect(text.split(install).length - 1).toBe(2);
+    expect(sec).not.toContain("OMARCHY_ENROLL=");
+    expect(sec).not.toMatch(/install\.sh[^\n`]*--legacy/);
+    // legacy.json is written only with --legacy, and the retired record's exception is what the way back's install needs.
+    expect(installSource).toContain("if let (Some(project), Some(seen)) = (&o.legacy, &ready.legacy) {");
+    expect(installSource).toContain("legacy_project.is_some() || retired.is_some_and(|l| l.rootful_exception)");
+    // A re-run keeps the identity and the worker token.
+    expect(text).toContain("`this machine is host h_2t7pul95fs on …`");
+    expect(enrollSource).toContain('"this machine is host {} on {}"');
+    expect(text).toContain("`host h_2t7pul95fs keeps its worker token …`");
+    expect(enrollSource).toContain('"host {} keeps its worker token ({}); `omarchy-agent token` rotates it"');
+    // What preflight shows on the remapped daemon.
+    expect(text).toContain("`isolation: subuid (a dedicated machine or VM)`, and no `! hosting:` line");
+    expect(checksSource).toContain('Isolation::Subuid => "subuid"');
+    expect(checksSource).toContain('"a dedicated machine or VM"');
+    expect(text).toContain("`emulation x86_64: on, through qemu, on pages larger than the guest's: …`");
+    expect(text).toContain("`legacy: omarchy-pool was retired at … ; its rootful exception stays until P6`");
+    expect(installSource).toContain('"legacy: {} was retired at {} ({}); {}"');
+    expect(installSource).toContain('"its rootful exception stays until P6"');
+    // The keys written again with their ACL, the sidecars named by their remapped uid.
+    expect(text).toContain("`wrote /srv/omarchy-host-secrets/agent.env (0640: its owner's, and readable by the agent sidecars' remapped uid 231069 through its ACL alone, #405; outside the work root)`");
+    expect(installSource).toContain("(0640: its owner's, and readable by the agent sidecars' remapped uid {uid} through its ACL alone, #405; outside the work root)");
+    expect(text).toContain("`OMARCHY_AGENT_REMAPPED_USER=65533:65533`");
+    expect(dispatcherEnvSource).toContain('pub const AGENT_REMAPPED_USER: &str = "OMARCHY_AGENT_REMAPPED_USER";');
+    // The dispatcher's two lines at start.
+    expect(text).toContain("`this daemon remaps users (userns-remap): a task's root is host uid 165536, gid 165536, …`");
+    expect(dispatchSource).toContain("this daemon remaps users (userns-remap): a task's root is host uid {}, gid {}, and what a task writes");
+    expect(text).toContain("`agent sidecars and the probe run as 65533:65533 in this remapped daemon, host uid 231069, gid 231069, which agent.env's ACL lets read it (#405)`");
+    expect(dispatchSource).toContain("agent sidecars and the probe run as {}:{} in this remapped daemon, host uid {}, gid {}, which agent.env's ACL lets read it (#405)");
+  });
+
+  it("checks from the site: the isolation, builds, an audit, the helpers, a hand-back to the VM, and a release with no visit", () => {
+    expect(text).toContain('select(.name == "studio-m2").fleet | {isolation, state, release, units}');
+    expect(text).toContain("SELECT isolation, agent_version, release_applied FROM hosts WHERE id = 'h_2t7pul95fs'");
+    // Bounded by the ids noted before: a primary-key range, not the whole table.
+    expect(text).toContain("SELECT (SELECT MAX(id) FROM build_tasks) AS n, (SELECT MAX(id) FROM events) AS e");
+    expect(text).toContain("WHERE id > <N> AND lease_owner = 'firemanxbr-studio-m2-mnmw'");
+    expect(text).toContain("WHERE id > <E> AND kind = 'build' AND json_extract(payload, '$.worker') = 'firemanxbr-studio-m2-mnmw'");
+    expect(text).toContain("health, promote and security, which prove the helpers");
+    expect(text).toContain("it needs a native x86_64 worker");
+    expect(factorySource).toContain("needs a native ${task.arch} worker — back in the queue for one");
+    expect(factorySource).toContain("worker: who,");
+    expect(text).toContain("(`host runs vX.Y.Z`)");
+    expect(rolloutSource).toContain('format!("{} runs {target}", ctx.cfg.set_name)');
+    // The pool jobs go to studio-vm4k meanwhile.
+    expect(text).toContain("SELECT value FROM settings WHERE key = 'host-pool-jobs'");
+    expect(text).toContain("lease_owner = 'firemanxbr-studio-vm4k-z0q4'");
+  });
+
+  it("has a way back of one day that deletes nothing, and reclaims the old data root afterwards through the old daemon itself", () => {
+    const back = text.slice(at("**The way back, within the day.**"));
+    // Its install.sh fetched and checked in its own block (the session's step 6 removed it), then removed.
+    const order = [
+      'tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version',
+      'curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"',
+      "gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool",
+      "systemctl --user stop omarchy-agent",
+      "sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json",
+      "sudo systemctl restart docker",
+      install,
+      "rm -f ~/install.sh",
+      "*Resume*",
+    ].map((s) => back.indexOf(s));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // One block that pastes as it stands in a new shell: it sets $tag and fetches install.sh before running it,
+    // and gives back only the caches step 4 set aside (after a failed start there are none).
+    const block = /```bash\n([\s\S]*?)```/.exec(sec.slice(sec.indexOf("**The way back, within the day.**")))?.[1] ?? "";
+    expect(block.indexOf('tag="$(curl')).toBeGreaterThanOrEqual(0);
+    expect(block.indexOf("curl -fsSLo ~/install.sh")).toBeGreaterThan(block.indexOf('tag="$(curl'));
+    expect(block.indexOf("sh ~/install.sh --work-root")).toBeGreaterThan(block.indexOf("gh attestation verify ~/install.sh"));
+    expect(block).toContain('if [ -e "$d.pre-remap" ]; then');
+    expect(back).toContain("`! hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6`");
+    expect(checksSource).toContain('"hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6"');
+    const reclaim = text.slice(at("**Afterwards, the move kept: the old data root reclaimed.**"));
+    const steps = ["sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json", "docker system prune --all --volumes --force", `${prep} `, "systemctl --user start omarchy-agent"].map((s) => reclaim.indexOf(s));
+    expect(steps.every((i) => i >= 0)).toBe(true);
+    expect([...steps].sort((a, b) => a - b)).toEqual(steps);
+    expect(reclaim).toContain("sudo snapper -c root list");
+  });
+
+  it("The Studio host and prep-root.sh's paragraph say the recorded exception lasts until this move, the Studio's next step now that its legacy set is retired", () => {
+    const flat = (s: string) => s.replace(/\s+/g, " ");
+    const host = flat(cut(runbook, "the-studio-host").split("\n### ")[0]);
+    expect(host).toContain("**Isolation `root`, a recorded exception until P6**");
+    expect(host).toContain("that set is retired (*Its legacy set, retired*, below), so nothing keeps the exception for a way back any more, and the move to `subuid` is the Studio's next step");
+    expect(host).toContain("P6 moves it to `subuid` in one root session, *The Studio at subuid* (below, #407)");
+    expect(host).toContain("after which the page says `subuid (dedicated)` and no *hosting* item");
+    expect(flat(runbook)).toContain("until the root session of *The Studio at subuid* (below) turns it on with that flag");
+    expect(runbook).not.toContain("`subuid` isolation is P6's");
+    // The canary's and the switch's sections left with #404 (#346): nothing here points at them.
+    expect(sec).not.toMatch(/\*The Studio (canary|switch)\*/);
+  });
+
+  it("asks only what is still to hold before the drain: the release carrying the opt-in, and studio-vm4k taking the pool jobs", () => {
+    // The legacy set's retirement and #404 are done: said, not asked for.
+    expect(text).toContain("its `retire-legacy` order done on 2026-10-13 at 12:36 UTC and its six registrations revoked");
+    expect(text).toContain("With the legacy set retired and #404 merged, two preconditions remain");
+    const order = [
+      "two preconditions remain",
+      "carries this section's own change, `prep-root.sh`'s `--remap-existing-daemon` (#434)",
+      "studio-vm4k takes the pool jobs while studio-m2 is drained: `host-pool-jobs` says `*`",
+      "SELECT value FROM settings WHERE key = 'host-pool-jobs'",
+      "SELECT (SELECT MAX(id) FROM build_tasks) AS n, (SELECT MAX(id) FROM events) AS e",
+      "**Drain** studio-m2's registration",
+    ].map(at);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The rings' cadence to compare with is the section's own query now that the switch's is gone.
+    expect(text).toContain("julianday(finished_at) - julianday(LAG(finished_at) OVER (PARTITION BY kind ORDER BY finished_at))");
+    expect(text).toContain("(*Before it*, step 3's second query)");
+  });
+});

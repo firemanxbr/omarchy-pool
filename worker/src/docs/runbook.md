@@ -566,9 +566,17 @@ CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across
 `omarchy-task-firewall.service` (rootful). A second run changes nothing,
 but enables and restarts that unit when it was disabled or stopped since;
 exit 1 lists what needs a person. The task subnets and the work root must be
-the ones the agent's install is given. The Studio ran it once, at its
-canary visit, and leaves `userns-remap` off there — its recorded exception
-until P6 (D13; *The Studio host*, below). A Mac runs
+the ones the agent's install is given. A daemon that already holds images
+or containers keeps userns-remap off, said under *needs a person*: turning
+it on moves the daemon to a data root of its own and leaves what it held
+behind. `--remap-existing-daemon` turns it on there all the same once no
+container runs (refused otherwise, exit 3, nothing changed): it keeps the
+`daemon.json` it had as `daemon.json.pre-remap`, says the old data root,
+which the remapped daemon never looks at, and checks that `docker info`
+lists `name=userns` after the restart (#407). The Studio ran it once, at
+its canary visit, and left `userns-remap` off there — its recorded
+exception until P6 (D13; *The Studio host*, below) — until the root
+session of *The Studio at subuid* (below) turns it on with that flag. A Mac runs
 [`factory/host/prep-mac.sh`](../factory/host/prep-mac.sh) instead, with no
 sudo (*Installing a Mac*, below).
 
@@ -2902,15 +2910,22 @@ worker that posted it (`payload.posted_by`), so a red of this host's says
 so.
 
 **Isolation `root`, a recorded exception until P6** (design v2 §19.1, §19.3,
-D13): rootful docker without `userns-remap`, since turning remapping on
-changes the daemon's data root. It is a dedicated build machine, so a
+D13): rootful docker (29.9.0, with the containerd image store) without
+`userns-remap`. Turning remapping on moves the daemon to a data root of its
+own, which would have stranded the legacy set while it was the switch's way
+back; that set is retired (*Its legacy set, retired*, below), so nothing
+keeps the exception for a way back any more, and the move to `subuid` is
+the Studio's next step. It is a dedicated build machine, so a
 task-container escape lands as root on a machine that holds nothing of a
-person's; its page shows the level and the exception. P6 moves it to
-`subuid` (rootless podman with `--userns=auto`, or `userns-remap` on a fresh
-data root), one root session, and the page then shows `subuid`. Its agent
+person's; its page shows the level, `root (dedicated)`, and the exception,
+a *hosting* item. P6 moves it to `subuid` in one root session, *The Studio
+at subuid* (below, #407): `userns-remap` on its existing daemon, after
+which the page says `subuid (dedicated)` and no *hosting* item; rootless
+podman with `--userns=auto` is later hardening (#430). Until then its agent
 sidecars run as the agent's uid, the owner of `agent.env`, with every
 capability dropped (`OMARCHY_AGENT_USER`, *How an agent sidecar reads the
-keys*, above).
+keys*, above); remapped, as 65533 inside, which `agent.env`'s ACL lets read
+the keys (*A remapped host's keys*, above).
 
 **The 4K VM, `studio-vm4k`** (#413), is a host of its own under the same
 owner, on the same machine: a Debian 13 arm64 VM with its own 4K-page
@@ -3092,6 +3107,331 @@ handed nothing), *Retire* the host, and lift the Studio's cap. What the VM
 sent back stays `refused_4k`, for a native host; what the Studio sent back
 waits for a native host or another lane on 4K pages, as before the VM.
 
+### The Studio at subuid
+
+Until this move the Studio's rootful docker runs without userns-remap, so a
+task container's root is the host's root: the recorded exception until P6
+(D13; *The Studio host*, above). The legacy set, on the same daemon, held
+it there while it was the switch's way back; that set is retired — its
+`retire-legacy` order done on 2026-10-13 at 12:36 UTC and its six
+registrations revoked (*Its legacy set, retired*, below) — and #404 took
+the legacy path out of the repository, so the move to `subuid` is the
+Studio's next step, P6's one root session (#407; a maintainer decision of
+2026-10-12, route (a)): userns-remap on its existing daemon, with the host
+drained meanwhile, then a way back of one day. Rootless podman with
+`--userns=auto`, route (b), is later hardening (#430). Its x86_64 lane
+stays on 16K pages: a build it sends back `needs_native` to studio-vm4k
+(*The Studio's x86_64 VM*, above) is that lane working, as before.
+
+**What the remapping changes.** The daemon (docker 29.9.0 with the
+containerd image store, on btrfs) starts empty on a data root of its own,
+`/var/lib/docker/165536.165536`, and a containerd namespace of its own,
+`moby-165536.165536`. Under userns-remap dockerd turns the containerd image
+store off by itself (its journal: `userns remapping enabled, disabling
+containerd snapshotter`) and keeps images in a graph driver there
+(overlay2, the first one docker tries, which works on btrfs). It never
+looks at what the daemon held before: `/var/lib/docker`'s own content and
+the images in containerd's `moby` namespace (17 images of 20 GB, 11
+containers and 1,453 volumes on 2026-10-12, before the legacy set's
+retirement removed its containers and networks) stay as they are, and they are the way back until they are
+reclaimed. So install's preflight and the first round pull the release's
+worker image and both build images again (minutes), the dispatcher makes
+its networks again (the old ones' bridges stay on the host until a reboot,
+and docker leaves the subnets the host has routes for out of its address
+pools), and the build caches the tasks wrote as host uid 0 and 1000 are
+set aside: a remapped task cannot write them, and they rebuild. From then
+on a task's root is host uid 165536, the first of `dockremap`'s
+range (the one after `firemanxbr:100000:65536`), and the agent sidecars run
+as host uid 231069 (65533 inside), which `agent.env`'s ACL lets read the
+keys (*A remapped host's keys*, above). studio-vm4k is the login's own qemu
+under `systemd --user` (`omarchy-vm4k`), which docker's restart does not
+touch.
+
+**Before it**, from the site. With the legacy set retired and #404
+merged, two preconditions remain, then the numbers to compare with and the
+drain:
+
+1. The release the Studio and studio-vm4k run (each host's page: its
+   release is the pool's) carries this section's own change,
+   `prep-root.sh`'s `--remap-existing-daemon` (#434), which the root
+   session runs from that release's tree (without it the session's step 3
+   stops at `unknown option`, with the host drained for nothing). Such a
+   release carries #407's two other changes too, merged before it: the
+   Worker takes a host's isolation from what its agent reports (#431), so
+   the page can say `subuid` (without it the page keeps the `root` it
+   enrolled with), and the pool jobs' helpers (health, promote, security)
+   run on a remapped daemon (#433; without it a remapped helper cannot read
+   its `/repo`, the Studio's pool jobs fail and the gate holds the rings):
+
+   ```bash
+   tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+   curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/prep-root.sh" | grep -c -- '--remap-existing-daemon) remap_existing'   # 1
+   ```
+2. studio-vm4k takes the pool jobs while studio-m2 is drained:
+   `host-pool-jobs` says `*` (*Pool jobs on hosts*, above), and its
+   registration ran some in the last day:
+
+   ```bash
+   npx wrangler d1 execute omarchy-repo --remote --command "SELECT value FROM settings WHERE key = 'host-pool-jobs'"
+   npx wrangler d1 execute omarchy-repo --remote --command "SELECT kind, COUNT(*) AS n, MAX(finished_at) AS last FROM build_tasks WHERE lease_owner = 'firemanxbr-studio-vm4k-z0q4' AND kind IN ('sync', 'promote', 'health', 'security') AND status = 'done' AND finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 days') GROUP BY kind"
+   ```
+3. Where the tasks and the journal stand, `<N>` and `<E>` for the checks
+   after, and the rings' cadence of the last week — the longest gap
+   between two syncs, and two promotions — to compare with:
+
+   ```bash
+   npx wrangler d1 execute omarchy-repo --remote --command "SELECT (SELECT MAX(id) FROM build_tasks) AS n, (SELECT MAX(id) FROM events) AS e"
+   npx wrangler d1 execute omarchy-repo --remote --command "SELECT kind, ROUND(MAX(gap) * 1440) AS longest_gap_min FROM (SELECT kind, julianday(finished_at) - julianday(LAG(finished_at) OVER (PARTITION BY kind ORDER BY finished_at)) AS gap FROM build_tasks WHERE kind IN ('sync', 'promote') AND status = 'done' AND finished_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 days')) GROUP BY kind"
+   ```
+4. **Drain** studio-m2's registration on its page
+   (`https://omarchy-pool.org/hosts/h_2t7pul95fs`), reason *the Studio moves
+   to subuid (#407)*: nothing new reaches it, and what was pinned to it goes
+   to the queue after three minutes. Wait until it runs nothing:
+
+   ```bash
+   curl -fsS https://omarchy-pool.org/api/v1/hosts | jq -r '.hosts[] | select(.name == "studio-m2").fleet | "tasks=\(.tasks) busy=\(.units_busy)"'   # tasks=0 busy=0
+   ```
+
+**The root session**, at the Studio as `firemanxbr` (sudo asks for its
+password), in `tmux`. Each step stops at the first thing that fails.
+
+1. Look first, from a checkout of the release the pool runs; nothing
+   changes:
+
+   ```bash
+   tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+   src="$(mktemp -d)" && git clone --quiet --depth 1 --branch "$tag" https://github.com/firemanxbr/omarchy-pool.git "$src"
+   docker ps --format '{{.Names}}'                                                   # omarchy-host-dispatcher-1, nothing else
+   docker info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}'   # overlayfs /var/lib/docker, no name=userns
+   grep -H . /etc/subuid /etc/subgid                                                 # firemanxbr:100000:65536 in both, no dockremap
+   grep -c -- '--remap-existing-daemon) remap_existing' "$src/factory/host/prep-root.sh"            # 1: the opt-in is there (0: stop here, nothing has changed)
+   ```
+2. The agent first, then its dispatcher. The agent's round starts a
+   stopped dispatcher again: on the old daemon while step 3 runs, or on the
+   remapped one before step 5, while `agent.toml` still says `userns_remap =
+   false` — a dispatcher that holds the model kinds there, as its
+   `OMARCHY_AGENT_USER` (agent.env's owner) is no container user of a
+   remapped daemon. `prep-root.sh` refuses while the agent runs as the
+   user, or a container does:
+
+   ```bash
+   systemctl --user stop omarchy-agent
+   docker stop omarchy-host-dispatcher-1
+   docker ps -q | wc -l        # 0
+   ```
+3. userns-remap on the existing daemon, with the host's work root and
+   task subnets — `prep-root.sh`'s `--remap-existing-daemon`, a dry run
+   first:
+
+   ```bash
+   sudo bash "$src/factory/host/prep-root.sh" --user "$USER" --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --remap-existing-daemon --dry-run
+   sudo bash "$src/factory/host/prep-root.sh" --user "$USER" --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --remap-existing-daemon
+   ```
+
+   Its other steps find what the canary's visit did (step 1's `pacman
+   --needed` installs nothing that is there). When it is right, its step 5
+   says `the daemon holds N container(s) and M image(s), none of them running`;
+   makes the `dockremap` user and `dockremap's subordinate ids:
+   165536-231071, its own`; says `turned on: a container escape lands in an
+   unprivileged subuid`, `the old data root, /var/lib/docker (storage driver
+   overlayfs, containerd namespace moby), stays as it is` and `the way back:
+   install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json
+   && systemctl restart docker.service`; writes
+   `/etc/docker/daemon.json.pre-remap` (the file as it was) and
+   `/etc/docker/daemon.json` (every key it had — `bip`, `dns`, the address
+   pools, the log options — and `"userns-remap": "default"`); restarts docker
+   and says `docker remaps users (docker info lists name=userns): its data
+   root /var/lib/docker/165536.165536, storage driver overlay2, containerd
+   namespace moby-165536.165536`. Its step 9 says `in place, applied again
+   after docker's restart`, and it ends `==> done`. Refused, exit 3, with
+   `the agent runs as firemanxbr (omarchy-agent, pid …)` or `container(s)
+   run (…)`: step 2 missed one; stop it and run it again — nothing has
+   changed. Exit 1 under `==> needs a person` with `userns-remap: docker did
+   not start with it, and is down` (dockerd refused the new
+   `daemon.json`; systemctl's `Job for docker.service failed` above it) or
+   `userns-remap: docker info does not list name=userns after the restart`
+   (it started without remapping), either one followed by the way back:
+   `sudo journalctl -u docker -n 80 --no-pager` says why, and the way back
+   (below) comes before anything else. Then:
+
+   ```bash
+   sudo journalctl -u docker -n 80 --no-pager | grep -i -E 'userns|snapshotter'   # … userns remapping enabled, disabling containerd snapshotter
+   systemctl --user is-active omarchy-vm4k                                         # active
+   ```
+4. The build caches aside (the pacman cache stays: tasks mount it
+   read-only, and its files are 0644):
+
+   ```bash
+   sudo sh -c 'cd /srv/omarchy-host/cache && for d in build used; do [ ! -e "$d" ] || mv "$d" "$d.pre-remap"; done; ls'   # build.pre-remap pacman used.pre-remap
+   ```
+5. The agent's install again, as `firemanxbr`, from the pool's release,
+   checked as *The host bundle* (above) checks it, with no
+   `OMARCHY_ENROLL` and no `--legacy`:
+
+   ```bash
+   curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"
+   gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool \
+     --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main
+   sh ~/install.sh --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \
+     --task-subnets 10.232.0.0/16 --dedicated --agent-env-from /srv/omarchy-host-secrets/agent.env
+   ```
+
+   Run again, install repairs. The identity in the agent's `state/` stays
+   (`this machine is host h_2t7pul95fs on …`, then `host h_2t7pul95fs keeps
+   its worker token …`), so do the owner's pinned passkey and seal key kept
+   there, and so do `agent.toml`'s other keys (`diagnostics`, the caps):
+   install sets only its own, `userns_remap` among them, from what it
+   detects. `--agent-env-from` names the keys' own file: install reads it
+   whole, then writes the keys in its place (a new file renamed over it)
+   with the ACL the remapped sidecars read them through; without it the
+   kept file, 0600, would hold the model kinds (`keys-acl`). No `--legacy`:
+   `legacy.json` keeps the retired set's record, whose `rootful_exception`
+   lets the way back's install run on a rootful daemon again, and the flag
+   would record a new one. Preflight's probes pull the release's images into
+   the empty data root first, then it must show:
+   - `isolation: subuid (a dedicated machine or VM)`, and no `! hosting:`
+     line;
+   - `emulation x86_64: on, through qemu, on pages larger than the guest's: …`,
+     16K pages as before;
+   - `legacy: omarchy-pool was retired at … ; its rootful exception stays until P6`,
+     a note;
+   - the egress probe passed.
+
+   The envelope to confirm says `userns_remap = true`; confirm it, and the
+   copy of the keys. It then says `wrote /srv/omarchy-host-secrets/agent.env
+   (0640: its owner's, and readable by the agent sidecars' remapped uid
+   231069 through its ACL alone, #405; outside the work root)`, names
+   `OMARCHY_AGENT_REMAPPED_USER=65533:65533` among `etc/dispatcher.env`'s
+   lines, and starts the agent, whose first round pulls and starts the
+   dispatcher on the new data root.
+6. Check at the host, once `omarchy-agent status` says its round is `ok`:
+
+   ```bash
+   grep '^userns_remap' ~/.local/share/omarchy-agent/agent.toml                       # userns_remap = true
+   jq -r .isolation ~/.local/share/omarchy-agent/sets/host/run/capacity.json            # subuid
+   getfacl -c /srv/omarchy-host-secrets/agent.env                                       # user::rw- user:231069:r-- group::--- mask::r-- other::---
+   grep -E '^OMARCHY_AGENT_(USER|REMAPPED_USER|HELD)=' ~/.local/share/omarchy-agent/sets/host/etc/dispatcher.env   # OMARCHY_AGENT_REMAPPED_USER=65533:65533 alone
+   ~/.local/share/omarchy-agent/current/omarchy-agent status
+   docker logs omarchy-host-dispatcher-1 2>&1 | grep -E 'remaps users|agent sidecars and the probe'
+   rm -rf "$src" ~/install.sh
+   ```
+
+   The dispatcher's two lines: `this daemon remaps users (userns-remap): a
+   task's root is host uid 165536, gid 165536, …` and `agent sidecars and
+   the probe run as 65533:65533 in this remapped daemon, host uid 231069,
+   gid 231069, which agent.env's ACL lets read it (#405)`. No reboot is
+   needed.
+7. On the site: **Resume** studio-m2's registration (its owner's drain is
+   its owner's to lift).
+
+**Check from the site**, with no visit:
+
+- **Its isolation.** The host's page says *Isolation* `subuid (dedicated)`,
+  no *hosting* item under *Needs a person*, its agent's probe `ok` and no
+  `model kinds held`; the public list says the same:
+
+  ```bash
+  curl -fsS https://omarchy-pool.org/api/v1/hosts | jq '.hosts[] | select(.name == "studio-m2").fleet | {isolation, state, release, units}'   # "subuid", "claiming"
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT isolation, agent_version, release_applied FROM hosts WHERE id = 'h_2t7pul95fs'"
+  ```
+- **Builds, an audit and pool jobs**, a day after (or once the pool has
+  handed it each kind), from `<N>` and `<E>`:
+
+  ```bash
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT kind, arch, lane, status, COUNT(*) AS n FROM build_tasks WHERE id > <N> AND lease_owner = 'firemanxbr-studio-m2-mnmw' GROUP BY kind, arch, lane, status"
+  npx wrangler d1 execute omarchy-repo --remote --command "SELECT id, status, summary FROM events WHERE id > <E> AND kind = 'build' AND json_extract(payload, '$.worker') = 'firemanxbr-studio-m2-mnmw'"
+  ```
+
+  The first must hold `done` rows for an aarch64 build, an audit, and
+  health, promote and security, which prove the helpers on the remapped
+  daemon. An x86_64 build ends one of two ways: staged on the Studio (a
+  C-only package), or sent back to studio-vm4k as before, a `build` warning
+  in the second query whose summary says it needs a native x86_64 worker.
+  That hand-back is this 16K-page lane's normal outcome; a failure that
+  says `Permission denied` or `Operation not permitted` is not, nor is any
+  other failure on the Studio that the same build did not have before. The
+  rings' cadence over the day (*Before it*, step 3's second query) shows no
+  gap longer than the week's before.
+- **A release with no visit.** At the next release, the host's page says
+  its release is the pool's and its last round `ok` (`host runs vX.Y.Z`),
+  its isolation still `subuid`, and no `model kinds held`: the remapping
+  holds through a self-update and a round.
+
+**The way back, within the day.** Nothing above deleted anything:
+
+1. On the site: *Drain* studio-m2's registration, reason *the way back
+   (#407)*, and wait until it runs nothing (the `curl` above).
+2. At the Studio, as `firemanxbr`, in a new shell: the pool's release's
+   `install.sh` fetched and checked again as in step 5 (step 6 removed
+   it). After an exit 1 in step 3 the host is drained, its agent and
+   dispatcher are stopped and docker may be down: step 1 is done, and the
+   two `stop` lines change nothing (docker's says it cannot connect). The
+   caches come back only where step 4 set them aside:
+
+   ```bash
+   tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+   curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"
+   gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool \
+     --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main
+   systemctl --user stop omarchy-agent
+   docker stop omarchy-host-dispatcher-1
+   sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json
+   sudo systemctl restart docker
+   docker info --format '{{.Driver}} {{.DockerRootDir}} {{json .SecurityOptions}}'   # overlayfs /var/lib/docker, no name=userns: the images it held are there
+   sudo systemctl restart omarchy-task-firewall.service
+   sudo sh -c 'cd /srv/omarchy-host/cache && for d in build used; do if [ -e "$d.pre-remap" ]; then [ ! -e "$d" ] || mv "$d" "$d.remapped"; mv "$d.pre-remap" "$d"; fi; done; ls'
+   sh ~/install.sh --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \
+     --task-subnets 10.232.0.0/16 --dedicated --agent-env-from /srv/omarchy-host-secrets/agent.env
+   rm -f ~/install.sh
+   ```
+
+   Preflight says `! hosting: a rootful daemon without userns-remap,
+   beside the legacy set: recorded as an exception until P6` and
+   `isolation: root (a dedicated machine or VM)`, a warning and not a
+   blocker because `legacy.json` keeps the retired set's
+   `rootful_exception`. The envelope says `userns_remap = false`, the keys
+   are written 0600 (`(0600, outside the work root)`), and
+   `etc/dispatcher.env` names `OMARCHY_AGENT_USER=1000:1000`.
+3. On the site: *Resume*.
+
+The `dockremap` user, its range and `/var/lib/docker/165536.165536` stay for
+a later attempt: the same session again finds the range and keeps it.
+
+**Afterwards, the move kept: the old data root reclaimed.** Only the old
+daemon sees what it held, so it removes it itself, in a short root session
+with the host drained: on the site *Drain* studio-m2's registration (reason
+*reclaim the old data root, #407*) and wait until it runs nothing; then at
+the Studio:
+
+```bash
+systemctl --user stop omarchy-agent
+docker stop omarchy-host-dispatcher-1
+sudo install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json
+sudo systemctl restart docker
+docker info --format '{{.DockerRootDir}} {{json .SecurityOptions}}'   # /var/lib/docker, no name=userns: the old daemon
+docker ps -aq | xargs -r docker rm -f                                 # its stopped containers
+docker system prune --all --volumes --force                            # its images, networks, anonymous volumes and build cache
+docker volume prune --all --force                                      # and its named volumes
+docker system df                                                       # nothing left
+tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+src="$(mktemp -d)" && git clone --quiet --depth 1 --branch "$tag" https://github.com/firemanxbr/omarchy-pool.git "$src"
+sudo bash "$src/factory/host/prep-root.sh" --user "$USER" --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --remap-existing-daemon
+systemctl --user start omarchy-agent
+~/.local/share/omarchy-agent/current/omarchy-agent status             # its round ok: the dispatcher back on the remapped daemon
+sudo rm -rf /srv/omarchy-host/cache/build.pre-remap /srv/omarchy-host/cache/used.pre-remap /etc/docker/daemon.json.pre-remap "$src"
+```
+
+`prep-root.sh` turns the remapping on again exactly as in the session, its
+`dockremap` range kept (`dockremap's subordinate ids: 165536:65536, its
+own`), and says `docker remaps users`; the agent needs no install, as
+nothing of its own changed, and its first round starts the stopped
+dispatcher again. Then *Resume* on the site. The way back goes with the old
+data root. The space comes back once no snapshot of the root subvolume
+holds it any more: `/var/lib/docker` is a plain directory of `/`, which
+snapper's `root` configuration snapshots, so `sudo snapper -c root list`
+shows the snapshots taken before the prune, and the space returns as
+snapper's cleanup removes them, or at once when they are deleted by hand.
+
 ### Its legacy set, retired
 
 Until its switch the Studio ran a legacy set from before hosts: fixed
@@ -3118,6 +3458,10 @@ cd /srv/omarchy-pool && ls -A                                       # the retire
 docker volume ls --filter label=com.docker.compose.project=omarchy-pool
 docker image ls ghcr.io/firemanxbr/omarchy-worker                   # images no container uses any more; docker image prune removes the dangling ones
 ```
+
+Its volumes and images are on the daemon's data root of before the
+remapping: once *The Studio at subuid* (above) has run, only the old daemon
+sees them, and that section's reclaim removes them with the rest.
 
 Nothing of the host is in that directory: its work root (`/srv/omarchy-host`)
 and its secrets (`/srv/omarchy-host-secrets`) were put beside it at the
@@ -3870,8 +4214,8 @@ show. The header of every page says so. To lift it by hand:
   transient errors.
 * **The Studio's isolation is `root` until P6.** Its rootful daemon runs
   without `userns-remap` (D13): an escape from a task container lands as
-  root on that dedicated machine. Until P6 moves it to `subuid`, the
-  contributors' code that runs there is what its page shows, and a sandboxed
+  root on that dedicated machine. Until P6 moves it to `subuid` (*The
+  Studio at subuid*, its next step), the contributors' code that runs there is what its page shows, and a sandboxed
   runtime on it (*A sandboxed runtime for community tasks*) narrows the
   escape for what a contributor wrote.
 

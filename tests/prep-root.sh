@@ -18,6 +18,13 @@
 #   Again: nothing changes.
 # - A daemon that already holds containers: userns-remap left off and docker
 #   not restarted, both said under "needs a person" (exit 1); no dockremap.
+# - --remap-existing-daemon (#407), the Studio's case: refused before any
+#   step (exit 3, a dry run too) while a container runs or the agent does;
+#   the dry run, the real run (dockremap's range, daemon.json merged and kept
+#   as .pre-remap, docker restarted and remapping, the firewall again), a
+#   second run; a docker that comes back without remapping, or does not start
+#   at all, said with the way back (exit 1) and the steps after still run;
+#   the containerd image store named, docker silent, rootless refused.
 # - A dockremap that already has a range (#405): kept, no user or range added.
 # - binfmt without the F flag: said (exit 1).
 # - --dry-run: nothing written, no command that changes the host.
@@ -39,8 +46,8 @@
 #
 # prep-root.sh runs as root on a real host: here its root check is lifted in
 # a copy, OMARCHY_PREP_FS points it at a temporary root, and pacman, apt-get,
-# systemctl, usermod, useradd, loginctl, btrfs, docker, id, getent, stat,
-# chown, uname and iptables are stubs on PATH that record what they were
+# systemctl, usermod, useradd, loginctl, btrfs, docker, pgrep, id, getent,
+# stat, chown, uname and iptables are stubs on PATH that record what they were
 # asked (usermod's --add-subuids and --add-subgids land in the temporary
 # root's /etc/subuid and /etc/subgid, useradd's dockremap in getent's answer).
 set -euo pipefail
@@ -82,13 +89,39 @@ esac'
 # stat -f -c %T: the filesystem type; stat -c "%U:%G %a": the owner chown set, and the mode.
 stub stat 'if [[ "$1" == -f ]]; then echo "$STUB_FSTYPE"; else printf "%s %s\n" "$(cat "$STATE/owner" 2>/dev/null || echo root:root)" "$(cat "$STATE/mode" 2>/dev/null || echo 755)"; fi'
 stub chmod 'if [[ "$1" == 0750 ]]; then echo "chmod $*" >> "$STUB_LOG"; echo 750 > "$STATE/mode"; fi; exec /bin/chmod "$@"'
-stub docker 'echo "docker $*" >> "$STUB_LOG.read"; case "$1" in info) echo "$STUB_DOCKER_COUNTS" ;; ps) printf "%s" "$STUB_DOCKER_PS" ;; esac'
+# docker: what it holds and runs; whether it remaps users, its data root and containerd namespace,
+# which follow the last restart (systemctl's stub: daemon.json's userns-remap, unless
+# STUB_DOCKER_NO_REMAP stands for a daemon that came back without it, and STUB_DOCKER_RESTART_FAILS
+# for one that does not start).
+stub docker 'echo "docker $*" >> "$STUB_LOG.read"
+remapped() { [[ -e "$STATE/remapped" ]]; }
+case "$1" in
+  info)
+    case "$*" in
+      *SecurityOptions*) if remapped; then echo "[\"name=seccomp,profile=builtin\",\"name=userns\"]"; else echo "[\"name=seccomp,profile=builtin\"]"; fi ;;
+      *DockerRootDir*) if remapped; then echo "overlay2 /var/lib/docker/165536.165536"; else echo "overlayfs /var/lib/docker"; fi ;;
+      *Namespaces*) if remapped; then echo "moby-165536.165536"; else echo moby; fi ;;
+      *ServerVersion*) echo 29.9.0 ;;
+      *Containers*) echo "$STUB_DOCKER_COUNTS" ;;
+    esac ;;
+  ps) printf "%s" "$STUB_DOCKER_PS" ;;
+esac'
+# pgrep -u <user> -x omarchy-agent: the agent's pids, from STUB_AGENT_PIDS (none: exit 1).
+stub pgrep 'echo "pgrep $*" >> "$STUB_LOG.read"; [[ -n "${STUB_AGENT_PIDS:-}" ]] || exit 1; echo "$STUB_AGENT_PIDS"'
 stub systemctl "$log"'
 case "$1" in
   is-active) [[ -e "$STATE/active-${3%.service}" ]] ;;
   show) cat "$STATE/pid-${5%.service}" 2>/dev/null || echo 0 ;;
   is-enabled) [[ -e "$STATE/enabled-${3%.service}" ]] ;;
   restart|enable)
+    if [[ "$*" == "restart docker.service" && -n "${STUB_DOCKER_RESTART_FAILS:-}" ]]; then
+      rm -f "$STATE/remapped"
+      echo "Job for docker.service failed because the control process exited with error code." >&2
+      exit 1
+    fi
+    if [[ "$*" == "restart docker.service" ]]; then
+      if grep -qs "\"userns-remap\"" "$OMARCHY_PREP_FS/etc/docker/daemon.json" && [[ -z "${STUB_DOCKER_NO_REMAP:-}" ]]; then touch "$STATE/remapped"; else rm -f "$STATE/remapped"; fi
+    fi
     [[ "$*" == *omarchy-task-firewall* && "$*" != "enable omarchy-task-firewall.service" ]] && touch "$STATE/active-omarchy-task-firewall"
     [[ "$1" == enable && "$*" == *omarchy-task-firewall* ]] && touch "$STATE/enabled-omarchy-task-firewall"
     true ;;
@@ -102,7 +135,7 @@ fresh() { # id arch fstype
   printf 'enabled\ninterpreter /usr/bin/qemu-%s-static\nflags: POCF\n' "$foreign" > "$tmp/fs/proc/sys/fs/binfmt_misc/qemu-$foreign"
   : > "$tmp/fs/sys/fs/cgroup/cgroup.controllers"
   echo omarchy > "$STATE/groups"
-  export STUB_ARCH="$2" STUB_FSTYPE="$3" STUB_DOCKER_COUNTS="0 0" STUB_DOCKER_PS=""
+  export STUB_ARCH="$2" STUB_FSTYPE="$3" STUB_DOCKER_COUNTS="0 0" STUB_DOCKER_PS="" STUB_AGENT_PIDS=""
 }
 prep() { # args… → $status, $tmp/out; the log starts empty
   : > "$STUB_LOG"; : > "$STUB_LOG.read"
@@ -372,5 +405,143 @@ manager "1000 "
 rm "$STATE/pid-user@1000"
 prep --user omarchy --work-root "$wr"
 [[ $status -eq 0 ]] || fail "a TPM, manager not read: exit $status, want 0"
+
+# --- An existing daemon remapped with --remap-existing-daemon (#407), the Studio's case: docker
+# holds images and containers, its daemon.json has keys of its own, the agent's user has the
+# first subordinate range.
+studio_json='{"bip":"172.17.0.1/16","default-address-pools":[{"base":"172.16.0.0/12","size":24}],"dns":["172.17.0.1"],"log-driver":"json-file","log-opts":{"max-file":"5","max-size":"10m"}}'
+studio() { # a host as the Studio's canary visit left it, its dispatcher running
+  fresh arch aarch64 btrfs
+  mkdir -p "$tmp/fs/etc/docker"
+  jq -S . <<<"$studio_json" > "$tmp/fs/etc/docker/daemon.json"
+  printf 'omarchy:100000:65536\n' > "$tmp/fs/etc/subuid"
+  printf 'omarchy:100000:65536\n' > "$tmp/fs/etc/subgid"
+  STUB_DOCKER_COUNTS="11 17" STUB_DOCKER_PS=$'omarchy-host-dispatcher-1\n'
+}
+remap=(--user omarchy --work-root "$wr" --task-subnets 10.232.0.0/16 --remap-existing-daemon)
+studio
+# Without the flag, as at the canary's visit: left off and said, the flag named; nothing restarted.
+prep --user omarchy --work-root "$wr" --task-subnets 10.232.0.0/16
+[[ $status -eq 1 ]] || fail "existing daemon, no flag: exit $status, want 1"
+grep -qF "userns-remap: left off, the daemon already holds containers or images (11 17)" "$tmp/out" \
+  && grep -qF -- "--remap-existing-daemon does it once no container runs, the old data root the way back (#407)" "$tmp/out" \
+  || fail "existing daemon, no flag: not said"
+not_logged "systemctl restart docker"
+not_logged useradd
+[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json")" == "$(jq -cS . <<<"$studio_json")" ]] || fail "existing daemon, no flag: daemon.json $(cat "$tmp/fs/etc/docker/daemon.json")"
+before="$(tree)"
+# The flag while a container runs: refused before any step, a dry run too, nothing changed.
+for d in "" --dry-run; do
+  # shellcheck disable=SC2086
+  prep "${remap[@]}" $d
+  [[ $status -eq 3 ]] || fail "flag, a container running ($d): exit $status, want 3"
+  grep -qF "1 container(s) run (omarchy-host-dispatcher-1): stop every one first" "$tmp/out" && grep -qF "; nothing changed" "$tmp/out" \
+    || fail "flag, a container running ($d): not said"
+  ! grep -q "^==> " "$tmp/out" || fail "flag, a container running ($d): a step began"
+  [[ ! -s "$STUB_LOG" && "$(tree)" == "$before" ]] || fail "flag, a container running ($d): changed something"
+done
+# The agent running, the dispatcher stopped (its round would start it again): refused the same way.
+STUB_DOCKER_PS="" STUB_AGENT_PIDS="4242"
+for d in "" --dry-run; do
+  # shellcheck disable=SC2086
+  prep "${remap[@]}" $d
+  [[ $status -eq 3 ]] || fail "flag, the agent running ($d): exit $status, want 3"
+  grep -qF "the agent runs as omarchy (omarchy-agent, pid 4242): stop it first, as omarchy — systemctl --user stop omarchy-agent — or its next round starts the dispatcher again; nothing changed" "$tmp/out" \
+    || fail "flag, the agent running ($d): not said"
+  grep -qxF "pgrep -u omarchy -x omarchy-agent" "$STUB_LOG.read" || fail "flag, the agent running ($d): pgrep not asked"
+  ! grep -q "^==> " "$tmp/out" || fail "flag, the agent running ($d): a step began"
+  [[ ! -s "$STUB_LOG" && "$(tree)" == "$before" ]] || fail "flag, the agent running ($d): changed something"
+done
+# The agent and the dispatcher stopped (stopped containers stay in the old data root): a dry run says every step.
+STUB_AGENT_PIDS=""
+prep "${remap[@]}" --dry-run
+[[ $status -eq 0 ]] || fail "flag, dry run: exit $status"
+# What it asked systemctl (whether the firewall unit runs) changes nothing; nothing else ran.
+grep -qvE '^systemctl (is-active|is-enabled) ' "$STUB_LOG" && fail "flag, dry run: ran something"
+[[ "$(tree)" == "$before" ]] || fail "flag, dry run: changed files"
+for said in "==> 5. userns-remap (an existing daemon: --remap-existing-daemon)" \
+  "the daemon holds 11 container(s) and 17 image(s), none of them running" \
+  "would run: useradd --system --user-group --no-create-home --shell /bin/false dockremap" \
+  "would run: usermod --add-subuids 165536-231071 --add-subgids 165536-231071 dockremap" \
+  "the old data root, /var/lib/docker (storage driver overlayfs, containerd namespace moby), stays as it is" \
+  "the way back: install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json && systemctl restart docker.service" \
+  "would write /etc/docker/daemon.json.pre-remap" "would write /etc/docker/daemon.json" \
+  "would run: systemctl restart docker.service" "would check that docker info lists name=userns" \
+  "would run: systemctl restart omarchy-task-firewall.service" "done (dry run"; do
+  grep -qF -- "$said" "$tmp/out" || fail "flag, dry run: not said: $said"
+done
+# The real run: dockremap's own range past the agent user's, daemon.json merged with every other
+# key kept and the one before beside it, docker restarted and remapping, the firewall again.
+prep "${remap[@]}"
+[[ $status -eq 0 ]] || fail "flag: exit $status"
+logged "useradd --system --user-group --no-create-home --shell /bin/false dockremap"
+logged "usermod --add-subuids 165536-231071 --add-subgids 165536-231071 dockremap"
+grep -qx 'dockremap:165536:65536' "$tmp/fs/etc/subuid" && grep -qx 'dockremap:165536:65536' "$tmp/fs/etc/subgid" \
+  || fail "flag: dockremap's range: $(cat "$tmp/fs/etc/subuid" "$tmp/fs/etc/subgid")"
+[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json")" == "$(jq -cS '. + {"userns-remap": "default"}' <<<"$studio_json")" ]] \
+  || fail "flag: daemon.json $(cat "$tmp/fs/etc/docker/daemon.json")"
+[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json.pre-remap")" == "$(jq -cS . <<<"$studio_json")" ]] \
+  || fail "flag: daemon.json.pre-remap $(cat "$tmp/fs/etc/docker/daemon.json.pre-remap" 2>&1)"
+line() { grep -nxF -- "$1" "$STUB_LOG" | head -n1 | cut -d: -f1; }
+logged "systemctl restart docker.service"
+logged "systemctl restart omarchy-task-firewall.service"
+[[ "$(line "usermod --add-subuids 165536-231071 --add-subgids 165536-231071 dockremap")" -lt "$(line "systemctl restart docker.service")" \
+  && "$(line "systemctl restart docker.service")" -lt "$(line "systemctl restart omarchy-task-firewall.service")" ]] \
+  || fail "flag: not dockremap's range, then docker's restart, then the firewall"
+grep -qF 'info --format {{json .SecurityOptions}}' "$STUB_LOG.read" || fail "flag: docker info not asked for name=userns"
+for said in "docker remaps users (docker info lists name=userns): its data root /var/lib/docker/165536.165536, storage driver overlay2, containerd namespace moby-165536.165536" \
+  "the old data root, /var/lib/docker (storage driver overlayfs, containerd namespace moby), stays as it is" \
+  "next, as the agent's user: its install again" "in place, applied again after docker's restart" "==> done"; do
+  grep -qF -- "$said" "$tmp/out" || fail "flag: not said: $said"
+done
+only pacman systemctl usermod useradd
+before="$(tree)"
+# Again: nothing changes, and it says the daemon remaps.
+prep "${remap[@]}"
+[[ $status -eq 0 && "$(tree)" == "$before" ]] || fail "flag, again: exit $status or files changed"
+for c in useradd usermod "systemctl restart docker" "systemctl restart omarchy-task-firewall"; do not_logged "$c"; done
+grep -qF "already set: default" "$tmp/out" && grep -qF "docker remaps users: its data root /var/lib/docker/165536.165536, storage driver overlay2" "$tmp/out" \
+  && grep -qxF "    in place" "$tmp/out" || fail "flag, again: not said"
+# A daemon that comes back without remapping: said, with the way back.
+studio; STUB_DOCKER_PS=""; export STUB_DOCKER_NO_REMAP=1
+prep "${remap[@]}"
+unset STUB_DOCKER_NO_REMAP
+[[ $status -eq 1 ]] || fail "flag, no remap after the restart: exit $status, want 1"
+grep -qF "userns-remap: docker info does not list name=userns after the restart (journalctl -u docker says why); the way back: install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json && systemctl restart docker.service" "$tmp/out" \
+  || fail "flag, no remap after the restart: not said"
+# A daemon that does not start with it (dockerd refuses the new daemon.json): said with the way
+# back, docker down, the steps after still run, and nothing claims the firewall was applied again.
+studio; STUB_DOCKER_PS=""; export STUB_DOCKER_RESTART_FAILS=1
+prep "${remap[@]}"
+unset STUB_DOCKER_RESTART_FAILS
+[[ $status -eq 1 ]] || fail "flag, docker does not start: exit $status, want 1"
+logged "systemctl restart docker.service"
+for said in "Job for docker.service failed" "==> 6." "==> 9." "==> needs a person" \
+  "userns-remap: docker did not start with it, and is down (journalctl -u docker says why); the way back: install -m 0644 /etc/docker/daemon.json.pre-remap /etc/docker/daemon.json && systemctl restart docker.service"; do
+  grep -qF -- "$said" "$tmp/out" || fail "flag, docker does not start: not said: $said"
+done
+! grep -qF "docker remaps users" "$tmp/out" && ! grep -qF "applied again after docker's restart" "$tmp/out" \
+  || fail "flag, docker does not start: said it remaps, or the firewall applied again"
+[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json.pre-remap")" == "$(jq -cS . <<<"$studio_json")" ]] || fail "flag, docker does not start: no daemon.json.pre-remap"
+# A new daemon that does not start again with daemon.json: said, the steps after still run.
+fresh arch aarch64 btrfs; export STUB_DOCKER_RESTART_FAILS=1
+prep --user omarchy --work-root "$wr"
+unset STUB_DOCKER_RESTART_FAILS
+[[ $status -eq 1 ]] && grep -qF "docker: did not start again with /etc/docker/daemon.json as written, and is down (journalctl -u docker says why)" "$tmp/out" \
+  && grep -qF "==> 9." "$tmp/out" || fail "new daemon, docker does not start: exit $status, or not said"
+# daemon.json naming the containerd image store, which dockerd refuses beside userns-remap: refused.
+studio; STUB_DOCKER_PS=""
+jq -S '. + {"features": {"containerd-snapshotter": true}}' <<<"$studio_json" > "$tmp/fs/etc/docker/daemon.json"
+before="$(tree)"
+prep "${remap[@]}"
+[[ $status -eq 3 && ! -s "$STUB_LOG" && "$(tree)" == "$before" ]] && grep -qF "features.containerd-snapshotter: true" "$tmp/out" \
+  || fail "flag, the containerd image store named: exit $status, or not refused"
+# docker that does not answer: refused.
+studio; STUB_DOCKER_PS=""
+PREP_PATH="$tmp/fresh/bin:$tmp/fresh/jq:$tmp/fresh/sys" prep "${remap[@]}"
+[[ $status -eq 3 && ! -s "$STUB_LOG" ]] && grep -qF "docker does not answer" "$tmp/out" || fail "flag, docker silent: exit $status"
+# Usage: rootless podman has no daemon.json.
+prep "${remap[@]}" --runtime rootless
+[[ $status -eq 2 && ! -s "$STUB_LOG" ]] || fail "flag, rootless: exit $status, want 2"
 
 echo "prep-root.sh: every root-only step, idempotent, nothing else"
