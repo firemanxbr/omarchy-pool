@@ -295,12 +295,14 @@ jobs:
     # while its task container and egress sidecar stay remapped: built as the builder,
     # uploaded and completed; the probe reads the keys as 65533:65533, and a draft's agent
     # sidecar runs remapped as that uid, writes its usage where the dispatcher gave it, and
-    # completes; the ACL lost holds the model kinds (keys-acl); and the dispatcher's
-    # real-engine tests on that engine. #407: also on docker 29.9.0 started on a fresh data
-    # root, so the containerd image store is on by default — the Studio's daemon —, which
-    # dockerd turns off by itself under userns-remap (its journal says so, and the storage
-    # driver after it is logged); on both, an image pulled before the remapping is gone from
-    # the remapped daemon and there again once daemon.json is put back: the way back.
+    # completes; a pool job's health check runs its helpers through omarchy-task-run as that
+    # remapped root, the directories its script made with mktemp -d opened to it first (#407);
+    # the ACL lost holds the model kinds (keys-acl); and the dispatcher's real-engine tests on
+    # that engine. #407: also on docker 29.9.0 started on a fresh data root, so the containerd
+    # image store is on by default — the Studio's daemon —, which dockerd turns off by itself
+    # under userns-remap (its journal says so, and the storage driver after it is logged); on
+    # both, an image pulled before the remapping is gone from the remapped daemon and there
+    # again once daemon.json is put back: the way back.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -377,7 +379,7 @@ jobs:
           # The remapped daemon starts in a data root of its own: the image pulled before is not in it.
           source tests/images.env
           ! docker image inspect "$BUSYBOX" >/dev/null 2>&1 || { echo "the remapped daemon sees the old store's image"; exit 1; }
-      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — and its model kinds, the keys read through their ACL by the sidecars' remapped uid alone
+      - name: A plain build on the remapped daemon through the dispatcher — the task's writable directories its remapped root's, built as the builder, uploaded and completed — its model kinds, the keys read through their ACL by the sidecars' remapped uid alone, and a pool job's helpers through omarchy-task-run
         run: bash tests/userns-remap.sh
       - name: The way back — daemon.json as it was, restarted — gives the old data root, its image there without a pull
         run: |
@@ -558,7 +560,7 @@ jobs:
       - name: The agent's claude-code provider, against a fake claude
         working-directory: .
         run: python3 tests/agent-claude-code.py
-      - name: The broker, against a fake agent and a fake pool
+      - name: The broker — a task's agent sidecar, within its caps — against a fake agent and a fake GitHub, with no pool path (#346)
         working-directory: .
         run: python3 tests/broker.py
       - name: The setup script, against an Asahi-like pacman.conf
@@ -579,7 +581,7 @@ jobs:
       - name: A build's resources.json says what it held that reclaim cannot free, not the page cache its files filled, in a container at its memory limit
         working-directory: .
         run: bash tests/worker-resources.sh
-      - name: The build script's task mode — no pool call, the log cut at its cap, verdict.json always JSON — in a container with the task's mounts
+      - name: The build script's task mode — no pool call, the log cut at its cap, verdict.json always JSON, an audit reaching its agent sidecar with the placeholder key as a draft does — in a container with the task's mounts
         working-directory: .
         run: bash tests/worker-task-mode.sh
       - name: The build user keeps the egress proxy's variables and nothing else of root's, so makepkg reaches a source from a host's internal task network
@@ -606,14 +608,6 @@ jobs:
       - name: The restart policy a worker counts on, on a real engine (on-failure:N runs out)
         working-directory: .
         run: bash tests/restart-policy.sh
-      - name: The updater follows the pool — brokers first, its lock and its guard — against a stubbed docker and pool
-        working-directory: .
-        # A loop that stopped honouring its TERM fails within the test's own bounds; this caps anything they miss.
-        timeout-minutes: 10
-        run: bash tests/omarchy-rollout.sh
-      - name: The Studio's host files — the updater in, the timer out, rollout.sh a wake-up — against stubs
-        working-directory: .
-        run: bash tests/host-setup.sh
       - name: A new host's root-only steps — prep-root.sh does each, dockremap's own range included, twice with no change, and nothing else — against stubs
         working-directory: .
         run: bash tests/prep-root.sh
@@ -626,12 +620,6 @@ jobs:
       - name: shellcheck of prep-mac.sh
         working-directory: .
         run: shellcheck factory/host/prep-mac.sh
-      - name: The Studio's dress rehearsal tool on a real engine — a stand-in of its legacy set from its compose file, sleepers and placeholders only; its ids the same after a restart and not after a recreation; the visit's checks, a work root under the directory the legacy set mounts refused, a GITHUB_TOKEN as install takes it (#319, #345)
-        working-directory: .
-        run: bash tests/studio-rehearsal.sh
-      - name: shellcheck of studio-rehearsal.sh
-        working-directory: .
-        run: shellcheck factory/host/studio-rehearsal.sh tests/studio-rehearsal.sh
       - name: The rollback — images and Worker back to a tag — against stubbed buildx and wrangler
         working-directory: .
         run: bash tests/rollback-workflow.sh
@@ -653,12 +641,12 @@ jobs:
       - name: The agent's version check fails a change to the agent without a version raise
         working-directory: .
         run: bash tests/agent-version.sh
-      - name: A maintainer's legacy set's command (factory/host/omarchy-worker, until P3), against a stubbed docker and pool — no new set, no mode, the switch guard
-        working-directory: .
-        run: bash tests/omarchy-worker-cli.sh
       - name: The contributor worker path and the community-worker claim code are gone — none of their identifiers in worker/src (#343)
         working-directory: .
         run: bash tests/contributor-path-gone.sh
+      - name: The legacy worker path is gone — the Studio's legacy files, the updater, omarchy-rollout and the broker's builder relay, and nothing in CI, the release or the docs names them (#346)
+        working-directory: .
+        run: bash tests/legacy-path-gone.sh
 
   worker-image:
     name: Worker image (a local build — every role starts)
@@ -694,7 +682,7 @@ jobs:
       # On docker only: the script's podman run (RUNTIME=podman, the dispatcher's docker CLI on
       # podman's socket) is by hand; in CI a task network the dispatcher makes on podman is covered
       # by agent-install's pkg-repo test on rootless podman (#372).
-      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the agent sidecar and the probe reading the 0600 keys of a non-root user as their owner, every capability dropped (#399); the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own
+      - name: Task networks on a real engine — the dispatcher started from the agent's etc/dispatcher.env and its read-only token file, no token or key in any container's environment; a public mirror through the egress sidecar only; cloud metadata, a name resolving to loopback, raw sockets, the host (its LAN and public addresses, and its services through a network's gateway) and the other task out of reach; the budget's caps; the agent sidecar and the probe reading the 0600 keys of a non-root user as their owner, every capability dropped (#399); the probe sidecar; a signed exception's bridge, its gateway closed behind an INPUT drop for its subnet; a stop removes only its own; an audit through its own agent sidecar, as a draft
         run: bash tests/task-networks.sh
         env:
           WORKER_IMAGE: omarchy-worker:ci

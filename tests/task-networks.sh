@@ -55,6 +55,12 @@
 #      and 2 were judged, and a note where it may not
 #   4. stopping A removes its container, its egress and agent sidecars and its
 #      network, and nothing of B's
+#   5. an audit (#319) runs as a draft does: the real build script's --task
+#      mode and the real auditor (this commit's factory/bin) on a staged build
+#      the dispatcher fetched, its key the placeholder, and its completion
+#      reaches the provider through its own agent sidecar — which refuses the
+#      sidecar's key with its own status (HTTP 401), not the "ANTHROPIC_API_KEY
+#      is not set" every audit on a host stopped on before (task 1627)
 #
 # And `docker inspect` of every container the dispatcher made — the task
 # containers, their egress and agent sidecars — shows no token or key in its
@@ -178,14 +184,22 @@ if [[ "$(basename "$RT")" == podman ]]; then
   disp_path="$tmp/cli:$PATH"
 fi
 
-# The release checkout: the probe task, and a sizing file that gives one package its exception.
+# The release checkout: the probe task, and a sizing file that gives one package its exception; and for an audit
+# (step 5) the real build script and this commit's tooling (the auditor, agent.py, the prompts, the skills).
 mkdir -p "$tmp/checkout/factory/worker" "$tmp/checkout/factory/sizing" "$tmp/work" "$tmp/secrets"
+cp "$root/factory/worker/omarchy-build-worker.sh" "$tmp/checkout/factory/worker/omarchy-build-worker.real.sh"
+cp -R "$root/factory/bin" "$root/factory/prompts" "$root/factory/skills" "$tmp/checkout/factory/"
 printf 'schema = 1\n[package."probe-direct"]\nnetwork = "direct"\nreason = "the network test: a raw socket"\n' > "$tmp/checkout/factory/sizing/tasks.toml"
 cat > "$tmp/checkout/factory/worker/omarchy-build-worker.sh" <<'STUB'
 #!/usr/bin/env bash
 # The probe task: once the test has written its targets, what this container can and cannot reach.
 set -uo pipefail
 source /task/in/meta.sh
+# An audit is the real script's, as a release runs it (step 5), once the test has read this container's environment.
+if [[ "${kind:-}" == audit ]]; then
+  for _ in $(seq 120); do [[ -f /task/in/inspected ]] && break; sleep 1; done
+  exec bash /pool/factory/worker/omarchy-build-worker.real.sh --task
+fi
 exec > /task/log/task.log 2>&1
 for _ in $(seq 120); do [[ -f /task/in/targets ]] && break; sleep 1; done
 source /task/in/targets
@@ -298,6 +312,12 @@ class H(BaseHTTPRequestHandler):
         self.record()
         # Who the host is answers only to its worker token, as the pool does.
         if self.path == "/api/v1/factory/workers/self": return self.send(200, {"id": host}) if self.headers.get("authorization") == f"Bearer {token}" else self.send(401, {"error": "unauthorized"})
+        # A staged build's artifacts, which an audit's preparation fetches (step 5).
+        m = re.match(r"/api/v1/factory/tasks/(\d+)/artifacts/([A-Za-z0-9._-]+)$", self.path)
+        if m and os.path.isfile(f"{d}/artifacts/{m.group(1)}/{m.group(2)}"):
+            data = open(f"{d}/artifacts/{m.group(1)}/{m.group(2)}", "rb").read()
+            self.send_response(200); self.send_header("content-type", "application/octet-stream"); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
+            return
         return self.send(404, {"error": "none"})
     def do_PUT(self):
         self.record(); return self.send(200, {})
@@ -324,9 +344,10 @@ port="$(cat "$tmp/port")"; ready_port=$((20000 + RANDOM % 2000))
 printf '{"schema":2,"at":"2026-10-02T00:00:00Z","cpus":12,"mem_gb":32,"page_kb":4,"disk_free_gb":{"work":200,"engine":150},"units":11,"job_reserved":1,"agent_slots":2,"lanes":[{"arch":"%s","mode":"native"}],"isolation":"root","dedicated":true,"limits":{"cpus_hard":true,"memory_hard":true,"pids":true},"below_minimum":false}\n' "$arch" > "$tmp/capacity.json"
 gen() { printf 'g_%016x' "$1"; }
 name() { echo "omarchy-task-$1-$(gen "$1")"; }
-give() { # id name ref — one task for the next claim
-  jq -cn --argjson id "$1" --arg n "$2" --arg r "$3" --arg a "$arch" --arg g "$(gen "$1")" \
-    '{task:{id:$id,kind:"build",name:$n,arch:$a,trust:"community",pkgbuild_ref:$r,params:{},attempts:1,max_attempts:3,publish:1,lease_gen:$g,units:2,disk_gb:0,release:"v9.9.9"},token:("omj.secret-of-" + ($id|tostring)),lease_minutes:30}' >> "$tmp/tasks.jsonl"
+give() { # id name ref [kind trust params] — one task for the next claim (a contributor's build unless said)
+  local params="${6:-}"; [[ -n "$params" ]] || params='{}'
+  jq -cn --argjson id "$1" --arg n "$2" --arg r "$3" --arg k "${4:-build}" --arg t "${5:-community}" --argjson p "$params" --arg a "$arch" --arg g "$(gen "$1")" \
+    '{task:{id:$id,kind:$k,name:$n,arch:$a,trust:$t,pkgbuild_ref:$r,params:$p,attempts:1,max_attempts:3,publish:1,lease_gen:$g,units:2,disk_gb:0,release:"v9.9.9"},token:("omj.secret-of-" + ($id|tostring)),lease_minutes:30}' >> "$tmp/tasks.jsonl"
 }
 until_() { local n="$1" what="$2"; shift 2; for _ in $(seq "$n"); do "$@" && return 0; sleep 1; done; fail "after ${n}s: $what"; }
 running() { [[ "$("$RT" inspect --format '{{.State.Status}}' "$1" 2>/dev/null)" == running ]]; }
@@ -477,4 +498,44 @@ touch "$tmp/beats/1"
 until_ 60 "task A's container, sidecars and network removed" eval 'gone "$A" && gone "$A-egress" && gone "$A-agent" && net_gone "$A"'
 running "$B" && running "$B-egress" && ! net_gone "$B" || fail "task B was touched by A's stop"
 echo "ok: stopping task A removes its container, its egress and agent sidecars and its network, and nothing of B's"
+
+# ---------- 5. an audit through its agent sidecar, as a draft (#319) ----------
+# The staged build an audit reads (the pool serves its artifacts to the lease's token): a recipe, its log, its .PKGINFO.
+mkdir -p "$tmp/artifacts/40"
+cat > "$tmp/artifacts/40/PKGBUILD" <<'PKGBUILD'
+pkgname=probe-audit
+pkgver=1.0
+pkgrel=1
+arch=(any)
+license=(MIT)
+package() { install -d "$pkgdir/usr/share/probe-audit"; }
+PKGBUILD
+printf '==> Making package: probe-audit 1.0-1\n==> Finished making: probe-audit 1.0-1\n' > "$tmp/artifacts/40/build.log"
+printf 'pkgname = probe-audit\npkgver = 1.0-1\narch = any\nlicense = MIT\n' > "$tmp/artifacts/40/PKGINFO"
+give 5 probe-audit "staging:40" audit project '{"task":40,"name":"probe-audit"}'
+E="$(name 5)"
+reported() { jq -c 'select(.path == "/api/v1/factory/tasks/5/fail" or .path == "/api/v1/factory/tasks/5/complete")' "$tmp/requests.jsonl" | tail -n1; }
+audit_started() { running "$E" || [[ -n "$(reported)" ]]; }
+audit_reported() { [[ -n "$(reported)" ]]; }
+# The stub holds the audit until the test has read its container (in/inspected), so this is never skipped.
+until_ 120 "the audit's container runs" audit_started
+running "$E" || fail "the audit reported before its container could be read: $(reported)"
+running "$E-agent" || fail "the audit runs without its agent sidecar"
+# Its key the placeholder alone, as a draft's (step 1): the real one is its agent sidecar's.
+cenv="$("$RT" inspect "$E" | jq -c --arg p "$placeholder" '[.[0].Config.Env[] | select(. != $p)]')"
+for secret in "$token" omw_ omj. sk-ant- OMARCHY_WORKER_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
+  [[ "$cenv" != *"$secret"* ]] || fail "the audit's environment holds $secret: $cenv"
+done
+"$RT" inspect "$E" | jq -e --arg p "$placeholder" '[.[0].Config.Env[] | select(startswith("ANTHROPIC_API_KEY="))] == [$p]' > /dev/null \
+  || fail "the audit's key is not the placeholder alone: $("$RT" inspect "$E" | jq -c '[.[0].Config.Env[] | select(startswith("ANTHROPIC_"))]')"
+touch "$tmp/work/tasks/5-$(gen 5)/in/inspected"
+until_ 300 "the audit reported" audit_reported
+said="$(reported)"
+# The sidecar's key is one the provider refuses (step 2): the audit fails, and how it fails says where it got. Before
+# #319 it stopped in the task container, the key held back from the auditor, and never reached its sidecar.
+jq -e '.body.error | test("is not set") | not' <<<"$said" >/dev/null \
+  || fail "the audit never reached its agent sidecar (the key held back from the auditor): $(jq -c '.body | {error, log_tail}' <<<"$said")"
+jq -e '(.path | endswith("/fail")) and (.body.error | test("HTTP Error 40[13]"))' <<<"$said" >/dev/null \
+  || fail "the audit's completion did not come back as the provider's refusal of the sidecar's key: $(jq -c '.body | {error, log_tail}' <<<"$said")"
+echo "ok: an audit runs the real script and auditor with its key the placeholder alone, and its completion reaches the provider through its own agent sidecar ($(jq -r .body.error <<<"$said")), as a draft's"
 echo "ok: task networks on a real engine ($RT, $WORKER_IMAGE)"

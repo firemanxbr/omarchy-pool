@@ -102,7 +102,10 @@
 //! to start) and gives each task's writable directories ([`kinds::WRITABLE`])
 //! and its build cache to it before the container starts, `in` opened for
 //! reading ([`kinds::open_input`]), or hands the lease back `lost`; the task
-//! directory, `tasks/`, `cache/` and `in` stay its own. Every other engine has
+//! directory, `tasks/`, `cache/` and `in` stay its own. A pool job's helper
+//! runs as that root too: the job's context names it, and the shim opens the
+//! helper's directory to it before the helper starts ([`shim::open_for`],
+//! #407). Every other engine has
 //! no such root, and nothing changes owner or mode. The agent sidecars and the
 //! probe there run as the one remapped uid the agent names
 //! (`OMARCHY_AGENT_REMAPPED_USER=65533:65533`, a variable of its own, which a
@@ -383,7 +386,9 @@ pub struct Net {
     /// `userns-remap`), asked of the engine at start ([`engine::Cli::remap`]): the
     /// directories this dispatcher makes for a task to write are given to it, and its `in`
     /// opened for reading, before its container starts, since a remapped root is "other" on
-    /// what host root made. `None` on every other engine, where nothing changes owner or mode.
+    /// what host root made; a pool job's helper gets its directory opened to it by the shim,
+    /// which the job's context tells (#407). `None` on every other engine, where nothing
+    /// changes owner or mode.
     pub task_root: Option<engine::TaskRoot>,
 }
 
@@ -1911,6 +1916,7 @@ impl Dispatcher {
             slot,
             deny: self.net.deny.clone(),
             engine: self.jobs.engine.clone(),
+            task_root: self.net.task_root,
         });
         let written = std::fs::create_dir_all(&scratch)
             .and_then(|()| {

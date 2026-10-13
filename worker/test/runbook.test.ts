@@ -1,17 +1,21 @@
 /**
- * AC4 of #277: the runbook's "After a release" asks nobody to touch a host.
+ * The runbook's *The Studio host* (#346, design v2 §21.1, §19.3): the Studio
+ * is a maintainer host like any other — one bundle, its capacity, lanes and
+ * isolation level said, nothing to run on the machine for a release — its
+ * legacy set retired, with the queries that show no legacy registration is
+ * left and that the pool's jobs go to the hosts; its *The Studio at subuid*
+ * (#407), the move to subuid in one root session, in the words of the code
+ * it runs; and AC4 of #277: its *After a release* asks nobody to touch a
+ * host.
  *
  * The runbook is the text the docs pages serve (bundled as text by
- * wrangler.toml's rules, as pages/docs-tree.ts imports it). Its section is
- * a real heading, `### After a release`, the last subsection of
- * `## The Studio host`: outline() finds it, and the cut below takes the
- * raw text from that heading's line to the next line, outside a code
- * fence, that is a heading of its level or higher — sectionText()'s
- * boundary rule, but with fenced code, tables and quotes kept and nothing
- * cut for length. sectionText() itself cannot serve: it skips code, tables
- * and quotes and stops at 220 characters, which is where a host command
- * would be. #278's section was a bold paragraph, which no heading check
- * can see; its words must be gone.
+ * wrangler.toml's rules, as pages/docs-tree.ts imports it). Its sections are
+ * real headings: outline() finds them, and the cut below takes the raw text
+ * from a heading's line to the next line, outside a code fence, that is a
+ * heading of its level or higher — sectionText()'s boundary rule, but with
+ * fenced code, tables and quotes kept and nothing cut for length.
+ * sectionText() itself cannot serve: it skips code, tables and quotes and
+ * stops at 220 characters, which is where a host command would be.
  */
 import { describe, expect, it } from "vitest";
 import runbook from "../src/docs/runbook.md";
@@ -40,81 +44,111 @@ function cut(md: string, id: string): string {
   return out.join("\n");
 }
 
-/** What a host command looks like in the runbook: a runtime, a login, an install, a service, root, the host's own scripts. */
-const HOST_COMMANDS = ["docker ", "podman ", "ssh", "install -m", "systemctl", "sudo", "setup.sh", "./rollout.sh"];
+/** What a host command looks like in the runbook: a runtime, a login, an install, a service, root. */
+const HOST_COMMANDS = ["docker ", "podman ", "ssh", "install -m", "systemctl", "sudo"];
 
-describe("the runbook's After a release (AC4 of #277)", () => {
-  it("is a real heading, the last subsection of The Studio host, after the one-time step", () => {
+/** What the legacy sets ran with, which left the repository with them (#346): no section of the Studio's names one as a thing to run. */
+const LEGACY_TOOLS = ["./rollout.sh", "setup.sh", "register.sh", "omarchy-worker start", "omarchy-worker update", "COMPOSE_PROFILES", "docker compose up", "Once: the updater", "agent-proxy", "broker-community"];
+
+describe("the runbook's The Studio host (#346, design v2 §21.1)", () => {
+  const studio = cut(runbook, "the-studio-host");
+
+  it("is a real section with four subsections, the Studio's x86_64 VM (#413), its move to subuid (#407), its retired legacy set and After a release, which the reviewing section follows", () => {
     const heads = outline(runbook);
-    const mine = heads.filter((h) => h.id === "after-a-release");
-    expect(mine).toHaveLength(1);
-    expect(mine[0].level).toBe(3);
-    const at = heads.indexOf(mine[0]);
-    const parent = heads.slice(0, at).reverse().find((h) => h.level <= 2);
-    expect(parent?.id).toBe("the-studio-host");
-    // The one-time step holds host commands, so it comes before, under a heading of its own; the next heading closes the section at level 2.
-    expect(heads[at - 1].title).toBe("Once: the updater (#277)");
-    expect(heads[at + 1].level).toBe(2);
-    expect(heads[at + 1].id).toBe("maintainers-reviewing-contributed-builds");
+    const at = heads.findIndex((h) => h.id === "the-studio-host");
+    expect(heads[at].level).toBe(2);
+    expect(heads.slice(at + 1, at + 6).map((h) => [h.level, h.id])).toEqual([
+      [3, "the-studio-s-x86-64-vm"],
+      [3, "the-studio-at-subuid"],
+      [3, "its-legacy-set-retired"],
+      [3, "after-a-release"],
+      [2, "maintainers-reviewing-contributed-builds"],
+    ]);
+    // The canary, the switch and the legacy set's one-time step were procedures for the switch, done: none is a heading any more.
+    for (const gone of ["the-studio-canary", "the-studio-switch", "once-the-updater-277"]) expect(heads.map((h) => h.id), gone).not.toContain(gone);
   });
 
-  it("asks nobody to touch a host: no host command anywhere in its text, code blocks included", () => {
+  it("says the Studio is a host like any other: one bundle, 11 units on two lanes, isolation root as the recorded exception until P6", () => {
+    expect(studio).toContain("is a maintainer host like any other");
+    expect(studio).toContain("11 units");
+    expect(studio).toContain("aarch64 native, and x86_64 emulated under\nqemu (`page16k`)");
+    expect(studio).toContain("**Isolation `root`, a recorded exception until P6**");
+    expect(studio).toContain("`/srv/omarchy-host`, a btrfs subvolume of its own");
+    expect(studio).toContain("`10.232.0.0/16`");
+    // Where its key and its token live, as the canary set them up: a file key, the Studio having no TPM (#330); the token's own
+    // file in the set directory (#327), on the compose driver.
+    expect(studio).toContain("`host.ed25519` in the agent's `state/`, a file: the Studio has no TPM");
+    expect(studio).toContain("`/srv/omarchy-host-secrets` (`--secrets-dir`, the login's, 0700; `agent.env`, 0600)");
+    expect(studio).toContain("`run/host/dispatcher/token` (0400), mounted read-only into the dispatcher (#327)");
+    // A build that dies of emulation goes back for a native host, its attempt given back.
+    expect(studio).toContain("`needs_native`, #338");
+  });
+
+  it("names the hosts as installed: the canary studio-m2 and, on the same machine, the 4K VM studio-vm4k, which builds only", () => {
+    // The canary as installed (#409): its name, id and registration, its secrets outside the work root.
+    expect(studio).toContain("the host `studio-m2`, id `h_2t7pul95fs`, its registration\n`firemanxbr-studio-m2-mnmw`");
+    expect(cut(runbook, "its-legacy-set-retired")).toContain("its secrets (`/srv/omarchy-host-secrets`) were put beside it");
+    // The VM (#413): a host of its own, a systemd --user unit, rootless podman on the Quadlet driver, no agent keys.
+    expect(studio).toContain("**The 4K VM, `studio-vm4k`** (#413), is a host of its own");
+    expect(studio).toContain("`systemd --user` unit `omarchy-vm4k.service`");
+    expect(studio).toContain("rootless podman with the Quadlet driver and holds no agent\nkeys");
+    // Its pool jobs fetch the keyrings before a check, and a red says whose it is (#414, #417).
+    expect(studio).toContain("Every job that checks a\nring now fetches the keyrings first");
+    expect(studio).toContain("`payload.posted_by`");
+  });
+
+  it("asks nothing of the legacy tools, and names the queries that show no legacy registration is left and the pool's jobs on the hosts", () => {
+    for (const tool of LEGACY_TOOLS) expect(studio, tool).not.toContain(tool);
+    const retired = cut(runbook, "its-legacy-set-retired");
+    expect(retired).toContain("`POST /factory/workers` answers 410");
+    expect(retired).toContain("WHERE kind = 'legacy' AND revoked_at IS NULL");
+    expect(retired).toContain("SELECT value FROM settings WHERE key = 'host-pool-jobs'");
+    // Nothing of the host is in the retired set's directory; the marker stays while its files do: an old copy of the set's tools refuses there.
+    expect(retired).toContain("Nothing of the host is in that directory");
+    expect(retired).toContain("keep the marker, which tells any old copy of the set's tools to\nrefuse there");
+    // The pool refuses no claim of a legacy row left unrevoked: the check is a hard precondition of the deploy.
+    expect(retired).toContain("a hard precondition of that deploy");
+    expect(retired).toContain("So do not deploy while the first two queries list anything.");
+  });
+
+  it("gives readopt-failed as a query that counts a task container's loss only, never a pool job's (#319)", () => {
+    expect(studio).toContain("**Whether it lost a task container**");
+    expect(studio).toContain("json_extract(e.payload, '$.lost') = 1");
+    // A task container's loss only (dispatch/mod.rs KINDS): a pool job lost with its dispatcher at a release is by design (#319).
+    expect(studio).toContain("JOIN build_tasks t ON t.id = json_extract(e.payload, '$.task')");
+    expect(studio).toContain("AND t.kind IN ('build', 'trial', 'audit')");
+  });
+});
+
+describe("the runbook's After a release (AC4 of #277)", () => {
+  it("asks nobody to touch a host: no host command anywhere in its text, code blocks included, and the rollback is from anywhere", () => {
     const text = cut(runbook, "after-a-release");
     expect(text.startsWith("### After a release")).toBe(true);
     expect(text).toContain("Nothing to do on any host");
     expect(text).toContain("gh workflow run rollback.yml -f to=");
-    for (const c of HOST_COMMANDS) expect(text, c).not.toContain(c);
-  });
-
-  it("says that on a host the agent manages nothing needs to be run, and names the marker, the refusals and the stand-down (#313)", () => {
-    const text = cut(runbook, "the-studio-host");
-    expect(text).toContain("On a host the agent manages, nothing needs to be run");
-    expect(text).toContain("`/srv/omarchy-pool/.omarchy-agent`");
-    expect(text).toContain("`omarchy-worker start|update|remove`");
-    expect(text).toContain("`stands-down`");
-    expect(text).toContain("`omarchy-agent status`");
-    // The host's installed copies learn the marker only from a new setup.sh run or a new copy — the CLI's from the repository since
-    // the pool no longer serves it (#343). Every CLI set takes it, a copy served after #313 too: each one the pool served fetches
-    // the compose file at start and update, which answers 410 from that deploy on.
-    expect(text).toContain("`grep -q omarchy-agent /srv/omarchy-pool/rollout.sh`");
-    expect(text).toContain("**Every CLI set replaces its `omarchy-worker`, once, at the deploy that\ncarries #343**");
-    expect(text).toContain("every copy the pool\nserved (one from after #313 too) fetches the compose file at `start` and\n`update`");
-    expect(text).toContain("`factory/host/omarchy-worker`");
-    expect(text).toContain("https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/factory/host/omarchy-worker && chmod +x omarchy-worker");
-    expect(cut(runbook, "after-a-release")).toContain("on a host the agent manages, nothing needs\nto be run");
-  });
-
-  it("lists, once before the deploy that carries #343, the registrations the owner test turns away and the maintainers' sets that were dedicated", () => {
-    const text = cut(runbook, "how-the-pool-hands-a-host-work");
-    const step = text.slice(text.indexOf("**Once, before the deploy that carries #343.**"));
-    expect(step.startsWith("**Once, before the deploy that carries #343.**")).toBe(true);
-    // The rows the claim refuses from then on: no owner, or one the maintainer list does not spell so.
-    expect(step).toContain("AND (owner IS NULL OR owner NOT IN (SELECT login FROM factory_maintainers))");
-    // A maintainer's set that took its owner's builds only takes anyone's from then on: its owner is told first.
-    expect(step).toContain("AND owner IN (SELECT login FROM factory_maintainers) AND mode IS NOT 'shared'");
-    expect(step).toContain("and tell each owner before the deploy");
+    for (const c of [...HOST_COMMANDS, ...LEGACY_TOOLS]) expect(text, c).not.toContain(c);
   });
 
   it("carries none of #278's paragraph, which asked for an install and restarts on the host", () => {
     expect(runbook).not.toContain("until this host has the new `rollout.sh`");
-    expect(runbook).not.toContain("install -m 755 factory/host/rollout.sh");
+    expect(runbook).not.toContain("rollout.sh");
   });
 
   it("the cut keeps code and tables under the heading, and stops at the next heading of its level", () => {
     const fixture = [
       "## The Studio host", "", "### After a release", "", "Nothing to do on any host.", "", "| a | b |", "|---|---|", "| x | y |", "",
-      "```bash", "# a comment, not a heading", "docker compose restart review-aarch64", "```", "", "#### A deeper heading stays in", "text", "",
-      "### Next", "", "```bash", "sudo setup.sh", "```",
+      "```bash", "# a comment, not a heading", "docker ps", "```", "", "#### A deeper heading stays in", "text", "",
+      "### Next", "", "```bash", "sudo prep-root.sh", "```",
     ].join("\n");
     const text = cut(fixture, "after-a-release");
-    expect(text).toContain("docker compose restart review-aarch64");
+    expect(text).toContain("docker ps");
     expect(text).toContain("| x | y |");
     expect(text).toContain("#### A deeper heading stays in");
     expect(HOST_COMMANDS.some((c) => text.includes(c))).toBe(true);
-    expect(text).not.toContain("sudo setup.sh");
+    expect(text).not.toContain("sudo prep-root.sh");
     expect(text).not.toContain("### Next");
     // The same command under the next heading is not in the cut.
-    const next = fixture.replace("docker compose restart review-aarch64", "echo fine");
+    const next = fixture.replace("docker ps", "echo fine");
     const clean = cut(next, "after-a-release");
     expect(HOST_COMMANDS.some((c) => clean.includes(c))).toBe(false);
   });
@@ -147,186 +181,13 @@ describe("the runbook's GitHub settings the signature relies on (#308)", () => {
   });
 });
 
-// The words the Studio's sections quote are the code's own (#319, #345): the agent's preflight, prep-root.sh and the rehearsal tool.
+// The Studio's move to subuid (#407): the root session's words are prep-root.sh's, the agent's and the dispatcher's own.
 import installSource from "../../crates/omarchy-agent/src/install/mod.rs?raw";
 import checksSource from "../../crates/omarchy-agent/src/install/checks.rs?raw";
-import legacySource from "../../crates/omarchy-agent/src/install/legacy.rs?raw";
 import prepRoot from "../../factory/host/prep-root.sh?raw";
-import rehearsal from "../../factory/host/studio-rehearsal.sh?raw";
-import studioCompose from "../../factory/host/compose.yml?raw";
 import rolloutSource from "../../crates/omarchy-agent/src/run/rollout.rs?raw";
-import hostRollout from "../../factory/host/rollout.sh?raw";
-import hostKeySource from "../../crates/omarchy-agent/src/host.rs?raw";
-import tpmSource from "../../crates/omarchy-agent/src/host/tpm.rs?raw";
 import enrollSource from "../../crates/omarchy-agent/src/enroll.rs?raw";
 import dispatcherEnvSource from "../../crates/omarchy-agent/src/dispatcher_env/mod.rs?raw";
-
-describe("the runbook's Studio canary and switch (#319, #345, design v2 §21.1)", () => {
-  const canary = cut(runbook, "the-studio-canary");
-  const sw = cut(runbook, "the-studio-switch");
-  /** The text with its line breaks, a command's continuations and indentation folded, as a reader reads it. */
-  const flat = (s: string) => s.replace(/\\\n/g, " ").replace(/\s+/g, " ");
-
-  it("are subsections of The Studio host, before its one-time step, which After a release still follows", () => {
-    const heads = outline(runbook);
-    const at = (id: string) => heads.findIndex((h) => h.id === id);
-    for (const id of ["the-studio-canary", "the-studio-switch"]) {
-      expect(heads[at(id)].level, id).toBe(3);
-      expect(heads.slice(0, at(id)).reverse().find((h) => h.level <= 2)?.id, id).toBe("the-studio-host");
-    }
-    expect(at("the-studio-canary")).toBeLessThan(at("the-studio-switch"));
-    expect(at("the-studio-switch")).toBeLessThan(at("once-the-updater-277"));
-  });
-
-  it("the visit's exact command keeps every new path out of what the legacy compose project mounts, and the check says why", () => {
-    const command = "--legacy omarchy-pool --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets \\\n     --task-subnets 10.232.0.0/16 --dedicated --agent-env-from <file>";
-    expect(canary).toContain(`   OMARCHY_ENROLL=ome_… sh ~/install.sh \\\n     ${command}`);
-    expect(canary).not.toMatch(/--work-root \/srv\/omarchy-pool|--secrets-dir \/srv\/omarchy-pool/);
-    // Why: the Studio's compose file mounts POOL_ROOT whole into its workers, and preflight refuses a work root under it, in its own words.
-    expect(studioCompose).toContain("- ${POOL_ROOT:-/srv/omarchy-pool}:${POOL_ROOT:-/srv/omarchy-pool}");
-    expect(flat(canary)).toContain("legacy: the work root … overlaps the legacy project's /srv/omarchy-pool; give a new --work-root beside it");
-    expect(legacySource).toContain("overlaps the legacy project's {}; give a new --work-root beside it");
-    expect(flat(canary)).toContain('studio-rehearsal.sh" check --project omarchy-pool --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets --task-subnets 10.232.0.0/16 --agent-env-from /srv/omarchy-pool/etc/agent.env');
-  });
-
-  it("installs the pool's release, $tag, through the attested install — never GitHub's latest, piped", () => {
-    const text = flat(canary);
-    expect(text).toContain('curl -fsSLo ~/install.sh "https://github.com/firemanxbr/omarchy-pool/releases/download/$tag/install.sh"');
-    expect(text).toContain("gh attestation verify ~/install.sh -R firemanxbr/omarchy-pool --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main");
-    // The same check The host bundle gives for the verifying install.
-    expect(flat(cut(runbook, "the-host-bundle"))).toContain("--signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main");
-    // Steps 4 and 6 run that file, the tag the checkout and preflight's --release name too.
-    expect(canary).toContain("   sh ~/install.sh \\\n     --legacy omarchy-pool");
-    expect(canary).toContain("   OMARCHY_ENROLL=ome_… sh ~/install.sh \\\n     --legacy omarchy-pool");
-    expect(canary).not.toContain("releases/latest/download/install.sh");
-    expect(canary).not.toMatch(/\| (OMARCHY_ENROLL=\S+ )?sh -s --/);
-    expect(text).toContain('git clone --quiet --depth 1 --branch "$tag"');
-    expect(text).toContain('omarchy-agent preflight --release "$tag"');
-  });
-
-  it("refreshes the Studio's rollout.sh before the ids are taken, as the one-time step says, and the check says it too", () => {
-    const text = flat(canary);
-    const grep = text.indexOf("grep -q omarchy-agent /srv/omarchy-pool/rollout.sh");
-    expect(grep).toBeGreaterThan(0);
-    expect(grep).toBeLessThan(text.indexOf('ids --project omarchy-pool > ~/legacy-ids-before'));
-    expect(text).toContain("paste the block in *Once: the updater* (below) now, before the ids are taken");
-    // The guard the grep looks for is the host copy's own (#313), and *On a host the agent manages* asks for it before the first retire-legacy.
-    expect(hostRollout).toMatch(/omarchy-agent/);
-    expect(flat(cut(runbook, "the-studio-host"))).toContain("`grep -q omarchy-agent /srv/omarchy-pool/rollout.sh` then says the copy has the guard");
-    expect(rehearsal).toContain("its rollout.sh has no guard for retire-legacy's .omarchy-agent marker — paste the runbook's *Once: the updater* block now");
-    expect(text).toContain("Its `rollout.sh` line says `ok` after step 1");
-  });
-
-  it("names what preflight must show in the agent's own words: 11 units, both lanes, the recorded exception, the legacy project", () => {
-    const text = flat(canary);
-    expect(text).toContain("`capacity: 12 CPUs, … 11 units on the aarch64 lane, the x86_64 lane through qemu`");
-    expect(installSource).toContain('"capacity: {} CPUs, {} GB, disks {} GB (work root) and {} GB (engine), {} units on the {} lane{}"');
-    expect(installSource).toContain('", the {} lane through {}"');
-    expect(text).toContain("`emulation x86_64: on, through qemu, on pages larger than the guest's: …`");
-    expect(checksSource).toContain('"emulation {}: on, through {}{pages}"');
-    expect(checksSource).toContain('", on pages larger than the guest\'s: a toolchain');
-    expect(text).toContain("`! hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6`");
-    expect(checksSource).toContain('"hosting: a rootful daemon without userns-remap, beside the legacy set: recorded as an exception until P6"');
-    expect(text).toContain("`isolation: root (a dedicated machine or VM)`");
-    expect(checksSource).toContain('"isolation: {} ({})"');
-    expect(text).toContain("`legacy: omarchy-pool, N container(s), recorded only and left running`");
-    expect(installSource).toContain('"legacy: {l}, {} container(s), recorded only and left running"');
-    expect(text).toContain("*enrollment: … OMARCHY_ENROLL is not set*");
-    expect(installSource).toContain("enrollment: this machine has not enrolled yet, and OMARCHY_ENROLL is not set");
-  });
-
-  it("says where the Studio's host key and worker token live, in the agent's own words and paths: a file key with no TPM (#330), the token's own file (#327)", () => {
-    const text = flat(canary);
-    // Preflight's note and the enrollment's line on a Linux machine with no TPM device (the default, OMARCHY_HOST_KEY unset).
-    expect(text).toContain("`host key: a file (no TPM: /dev/tpmrm0 is not there)`");
-    expect(checksSource).toContain('r.notes.push(format!("host key: a file ({why})"))');
-    expect(tpmSource).toContain('return Err(format!("no TPM: {dev} is not there"));');
-    expect(text).toContain("`host key: a file (Ed25519, host.ed25519, mode 0600); not in the TPM: no TPM: /dev/tpmrm0 is not there`");
-    expect(enrollSource).toContain('"host key: {}{}"');
-    expect(enrollSource).toContain('format!("; not in the TPM: {why}")');
-    expect(hostKeySource).toContain('Inner::File(_) => format!("a file (Ed25519, {KEY_FILE}, mode 0600)")');
-    expect(hostKeySource).toContain('pub const KEY_FILE: &str = "host.ed25519";');
-    // The host worker token: its own file in the set directory, which install puts under the data directory on Linux.
-    expect(text).toContain("~/.local/share/omarchy-agent/sets/host/run/host/dispatcher/token");
-    expect(dispatcherEnvSource).toContain('pub const TOKEN_FILE: &str = "run/host/dispatcher/token";');
-    expect(installSource).toContain('self.data.join("sets").join("host")');
-    // The compose driver on the Studio's rootful docker: Quadlet is rootless podman's.
-    expect(text).toContain("on the compose driver (Quadlet is rootless podman's, #330)");
-  });
-
-  it("sets the pool cap before Confirm, pins the owner's passkey at the visit, and checks a reboot with nobody logged in", () => {
-    const text = flat(canary);
-    expect(text).toContain("**the pool cap first, then Confirm**");
-    expect(text).toContain("*Set the pool cap*, **3 units** (one build plus the job unit)");
-    expect(text).toContain("envelope pin-passkey <pin>");
-    expect(text).toContain("`sudo reboot`, and do not log in");
-    expect(text).toContain("studio-rehearsal.sh\" compare ~/legacy-ids-before --project omarchy-pool");
-    // How to stop it from the site: the cap at 0.
-    expect(text).toContain("*Set the pool cap* to **0** on its page");
-  });
-
-  it("says prep-root.sh's two expected lines on the Studio in its own words, and that docker is not restarted", () => {
-    const text = flat(canary);
-    expect(text).toContain("*userns-remap: left off, the daemon already holds containers*");
-    expect(prepRoot).toContain("userns-remap: left off, the daemon already holds containers or images");
-    expect(text).toContain("*docker: daemon.json changed while N container(s) run; restart docker.service when none does* — do not restart docker");
-    expect(prepRoot).toContain("docker: daemon.json changed while $running container(s) run; restart docker.service when none does");
-  });
-
-  it("has retire-legacy's marker directory and the GITHUB_TOKEN fixed at the visit, as the rehearsal tool says them", () => {
-    const text = flat(canary);
-    expect(text).toContain('`sudo chown "$USER" /srv/omarchy-pool && sudo chmod go-w /srv/omarchy-pool` — the directory alone, never `-R`');
-    expect(rehearsal).toContain("retire-legacy writes its .omarchy-agent marker there only when $(id -un) owns it and nobody else may write it");
-    expect(text).toContain("install copies only a classic token with no scope");
-    expect(rehearsal).toContain("GitHub names no scopes for its GITHUB_TOKEN (a fine-grained or app token)");
-  });
-
-  it("gives the exit criteria as queries: no readopt-failed, a release across a task, both lanes staged, a ring moved", () => {
-    expect(canary).toContain("json_extract(e.payload, '$.lost') = 1");
-    // A task container's loss only (dispatch/mod.rs KINDS): a pool job lost with its dispatcher at a release is by design (#319).
-    expect(canary).toContain("JOIN build_tasks t ON t.id = json_extract(e.payload, '$.task')");
-    expect(canary).toContain("AND t.kind IN ('build', 'trial', 'audit')");
-    expect(canary).toContain("t.started_at < json_extract(h.report, '$.round.at') AND t.finished_at > json_extract(h.report, '$.round.at')");
-    // Only the round that applied a release: the host's release changed from the one noted before, and the round's detail names it in
-    // the agent's words — a round forced to the release it runs (Reconcile now, a widening) does not count.
-    expect(canary).toContain(`SELECT release_applied FROM hosts WHERE id = '<host>'`);
-    expect(canary).toContain("h.release_applied IS NOT '<before>' AND json_extract(h.report, '$.round.detail') LIKE '% runs ' || h.release_applied");
-    expect(rolloutSource).toContain('format!("{} runs {target}", ctx.cfg.set_name)');
-    expect(canary).toContain("GROUP BY arch, lane");
-    expect(canary).toContain("kind IN ('sync', 'promote') AND status = 'done'");
-  });
-
-  it("the switch raises the cap, moves pins, drains the six; the way back drains the host and resumes them; the retirement's order", () => {
-    const text = flat(sw);
-    const steps = ["**Raise the cap**", "**Move pins here**", "**Drain the six legacy registrations**"].map((s) => text.indexOf(s));
-    expect(steps.every((i) => i > 0)).toBe(true);
-    expect([...steps].sort((a, b) => a - b)).toEqual(steps);
-    expect(text).toContain('"kind":"drain","reason":"the Studio switch (#345)"');
-    expect(text).toContain("*Drain* its registration, reason *the way back*");
-    expect(text).toContain("but what was moved onto it would wait for it");
-    expect(text).toContain("**Rehearse the way back**");
-    // Retired after the 14 days: Retire legacy set first, then Revoke the six.
-    expect(text.indexOf("*Retire legacy set* on the host's page")).toBeLessThan(text.indexOf("*Revoke* on each one's page"));
-    expect(text).toContain("`host-pool-jobs` set to `*`");
-    // Move pins here names the Studio's set, never another machine's of the same owner.
-    expect(text).toContain("the press names those registrations alone, so another machine's pins never move with them");
-    // The requester-host rule as main holds it: lifted for the maintainer [solo] names (#394).
-    expect(text).toContain("never the project's copy onto its requester's host (D35) — but for the maintainer `[solo]` names, whose own copies their hosts take");
-  });
-
-  it("the dress rehearsal's VM has qemu's binfmt before stand-in, and says how a long build lands on it", () => {
-    const text = flat(canary);
-    const vm = text.indexOf("qemu-user-static qemu-user-static-binfmt");
-    expect(vm).toBeGreaterThan(0);
-    expect(vm).toBeLessThan(text.indexOf('studio-rehearsal.sh" stand-in --dir /srv/omarchy-pool'));
-    // Why: the stand-in keeps the compose file's platform for the x86_64 community worker.
-    expect(studioCompose).toMatch(/community-x86_64:\n(?:.*\n){0,3}\s+platform: linux\/amd64/);
-    expect(text).toContain("No door aims a dry run at one host (`POST /factory/enqueue` pins none)");
-    expect(text).toContain("until its page's *Leases* shows one of them");
-  });
-});
-
-// The Studio's move to subuid (#407): the root session's words are prep-root.sh's, the agent's and the dispatcher's own.
 import dispatchSource from "../../crates/pkg-repo/src/dispatch/mod.rs?raw";
 import remapSource from "../../crates/omarchy-agent/src/dispatcher_env/remap.rs?raw";
 import factorySource from "../src/routes/factory.ts?raw";
@@ -343,14 +204,14 @@ describe("the runbook's Studio at subuid (#407)", () => {
   const install = "sh ~/install.sh --work-root /srv/omarchy-host --secrets-dir /srv/omarchy-host-secrets --task-subnets 10.232.0.0/16 --dedicated --agent-env-from /srv/omarchy-host-secrets/agent.env";
   const prep = 'sudo bash "$src/factory/host/prep-root.sh" --user "$USER" --work-root /srv/omarchy-host --task-subnets 10.232.0.0/16 --remap-existing-daemon';
 
-  it("is a subsection of The Studio host, after its x86_64 VM and before the one-time step", () => {
+  it("is a subsection of The Studio host, after its x86_64 VM and before its retired legacy set", () => {
     const heads = outline(runbook);
     const i = (id: string) => heads.findIndex((h) => h.id === id);
     expect(heads[i("the-studio-at-subuid")]?.level).toBe(3);
     expect(heads.slice(0, i("the-studio-at-subuid")).reverse().find((h) => h.level <= 2)?.id).toBe("the-studio-host");
     expect(i("the-studio-s-x86-64-vm")).toBeGreaterThan(0);
     expect(i("the-studio-s-x86-64-vm")).toBeLessThan(i("the-studio-at-subuid"));
-    expect(i("the-studio-at-subuid")).toBeLessThan(i("once-the-updater-277"));
+    expect(i("the-studio-at-subuid")).toBeLessThan(i("its-legacy-set-retired"));
   });
 
   it("drains the host, stops its agent and dispatcher, runs prep-root.sh's opt-in after its dry run, sets the build caches aside, then installs again, and resumes", () => {
@@ -492,12 +353,34 @@ describe("the runbook's Studio at subuid (#407)", () => {
     expect(reclaim).toContain("sudo snapper -c root list");
   });
 
-  it("the canary and the switch say the recorded exception lasts until this move", () => {
-    const canary = cut(runbook, "the-studio-canary").replace(/\s+/g, " ");
-    const sw = cut(runbook, "the-studio-switch").replace(/\s+/g, " ");
-    expect(canary).toContain("without userns-remap (D13, until *The Studio at subuid*, below)");
-    expect(canary).toContain("the Studio's recorded exception until *The Studio at subuid* (below), after which it says `subuid (dedicated)` and no *hosting* item");
-    expect(sw).toContain("one root session moves the Studio to `subuid` isolation (*The Studio at subuid*, below, #407)");
+  it("The Studio host and prep-root.sh's paragraph say the recorded exception lasts until this move, the Studio's next step now that its legacy set is retired", () => {
+    const flat = (s: string) => s.replace(/\s+/g, " ");
+    const host = flat(cut(runbook, "the-studio-host").split("\n### ")[0]);
+    expect(host).toContain("**Isolation `root`, a recorded exception until P6**");
+    expect(host).toContain("that set is retired (*Its legacy set, retired*, below), so nothing keeps the exception for a way back any more, and the move to `subuid` is the Studio's next step");
+    expect(host).toContain("P6 moves it to `subuid` in one root session, *The Studio at subuid* (below, #407)");
+    expect(host).toContain("after which the page says `subuid (dedicated)` and no *hosting* item");
+    expect(flat(runbook)).toContain("until the root session of *The Studio at subuid* (below) turns it on with that flag");
     expect(runbook).not.toContain("`subuid` isolation is P6's");
+    // The canary's and the switch's sections left with #404 (#346): nothing here points at them.
+    expect(sec).not.toMatch(/\*The Studio (canary|switch)\*/);
+  });
+
+  it("asks only what is still to hold before the drain: the release carrying the opt-in, and studio-vm4k taking the pool jobs", () => {
+    // The legacy set's retirement and #404 are done: said, not asked for.
+    expect(text).toContain("its `retire-legacy` order done on 2026-10-13 at 12:36 UTC and its six registrations revoked");
+    expect(text).toContain("With the legacy set retired and #404 merged, two preconditions remain");
+    const order = [
+      "two preconditions remain",
+      "carries this section's own change, `prep-root.sh`'s `--remap-existing-daemon` (#434)",
+      "studio-vm4k takes the pool jobs while studio-m2 is drained: `host-pool-jobs` says `*`",
+      "SELECT value FROM settings WHERE key = 'host-pool-jobs'",
+      "SELECT (SELECT MAX(id) FROM build_tasks) AS n, (SELECT MAX(id) FROM events) AS e",
+      "**Drain** studio-m2's registration",
+    ].map(at);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The rings' cadence to compare with is the section's own query now that the switch's is gone.
+    expect(text).toContain("julianday(finished_at) - julianday(LAG(finished_at) OVER (PARTITION BY kind ORDER BY finished_at))");
+    expect(text).toContain("(*Before it*, step 3's second query)");
   });
 });
