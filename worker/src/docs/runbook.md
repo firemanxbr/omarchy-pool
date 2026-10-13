@@ -3152,6 +3152,12 @@ are the Studio's, to read as that host's own.
   from 15:12 to 15:16, and audit 1640 ran on studio-m2 from 15:16 to 15:17,
   its agent sidecar reading the keys through the ACL.
 
+**Still to be seen**, as of 2026-10-13: two items of *Check from the site*
+(below), the pool jobs (health, promote, security) on the remapped daemon
+— the #433 risk: if they fail there, the gate holds the rings — and a
+release reaching the host with no visit. The way back stays open until
+2026-10-14 ~15:00 UTC, one day after the 15:01 drain.
+
 The way back within the day stays below as it was written, and the old
 data root is reclaimed afterwards, through the old daemon itself (the
 last part of this section).

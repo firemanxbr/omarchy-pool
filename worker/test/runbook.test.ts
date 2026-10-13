@@ -232,6 +232,9 @@ describe("the runbook's Studio at subuid (#407)", () => {
       "`etc/dispatcher.env` with `OMARCHY_AGENT_REMAPPED_USER=65533:65533` alone; `run/capacity.json` says `subuid`",
       "15:08, the registration resumed; the pool's `hosts` row and `/api/v1/hosts/fleet` say isolation `subuid` (#431)",
       "build 1639 (omarchy-cli, aarch64 native) staged from 15:12 to 15:16, and audit 1640 ran on studio-m2 from 15:16 to 15:17",
+      // What the section's own checks have not yet seen, and until when the way back stays open.
+      "**Still to be seen**, as of 2026-10-13: two items of *Check from the site* (below), the pool jobs (health, promote, security) on the remapped daemon — the #433 risk: if they fail there, the gate holds the rings — and a release reaching the host with no visit.",
+      "The way back stays open until 2026-10-14 ~15:00 UTC, one day after the 15:01 drain.",
       "**What the remapping changes.**",
       "**Before it**, from the site.",
     ].map(at);
